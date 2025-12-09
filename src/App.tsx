@@ -18,19 +18,15 @@ interface ErrorState {
 
 type ChunkDetailCache = Record<number, ChunkDetail>;
 
-function highlightWord(
-  chunkText: string,
-  start: number,
-  end: number
-): JSX.Element {
-  if (start < 0 || end > chunkText.length || start >= end) {
-    return <span>{chunkText}</span>;
+function highlightWord(text: string, start: number, end: number): JSX.Element {
+  if (start < 0 || end > text.length || start >= end) {
+    return <span>{text}</span>;
   }
   return (
     <span>
-      {chunkText.slice(0, start)}
-      <mark>{chunkText.slice(start, end)}</mark>
-      {chunkText.slice(end)}
+      {text.slice(0, start)}
+      <mark>{text.slice(start, end)}</mark>
+      {text.slice(end)}
     </span>
   );
 }
@@ -47,6 +43,7 @@ export default function App() {
   const [micError, setMicError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [autoPlayPending, setAutoPlayPending] = useState(false);
   const [vadState, setVadState] = useState<"idle" | "listening" | "triggered">(
     "idle"
   );
@@ -103,6 +100,14 @@ export default function App() {
     };
     fetchDetail();
   }, [selectedChunkId, chunkDetails]);
+
+  // Auto-start playback once mic is enabled and we have a chunk.
+  useEffect(() => {
+    if (micEnabled && selectedChunkId != null && autoPlayPending) {
+      handlePlay();
+      setAutoPlayPending(false);
+    }
+  }, [micEnabled, selectedChunkId, autoPlayPending]);
 
   const selectedChunkDetail = useMemo(() => {
     if (selectedChunkId == null) return null;
@@ -171,6 +176,7 @@ export default function App() {
       audioContextRef.current = context;
       audioEngineRef.current = new AudioEngine(context);
       setMicEnabled(true);
+      setAutoPlayPending(true);
     } catch (err) {
       const message = (err as Error).message || "Failed to enable microphone";
       setMicError(message);
@@ -260,72 +266,22 @@ export default function App() {
     setLiveMessage("Auto interruption detected and sent to server.");
   }
 
-  const chunkList = (
-    <div style={{ border: "1px solid #ccc", padding: "0.5rem", maxHeight: "50vh", overflowY: "auto" }}>
-      <h3>Chunks</h3>
-      <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-        {chunks.map((chunk) => (
-          <li key={chunk.chunk_id} style={{ marginBottom: "0.5rem" }}>
-            <button
-              onClick={() => setSelectedChunkId(chunk.chunk_id)}
-              disabled={isLoading}
-              style={{
-                width: "100%",
-                textAlign: "left",
-                padding: "0.5rem",
-                background:
-                  selectedChunkId === chunk.chunk_id ? "#e0f2ff" : "#f7f7f7",
-                border: "1px solid #ccc",
-                borderRadius: "4px",
-              }}
-            >
-              <strong>Chunk {chunk.chunk_id}</strong> ({chunk.doc_char_start}–
-              {chunk.doc_char_end})
-              <div style={{ color: "#444", marginTop: "0.25rem" }}>
-                {chunk.preview}
-              </div>
-            </button>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
+  function handleContinue() {
+    if (!micEnabled) return;
+    setInterruptionResult(null);
+    handlePlay();
+  }
 
-  const chunkDetailSection = (
-    <div style={{ border: "1px solid #ccc", padding: "0.75rem", flex: 1 }}>
-      <h3>Active chunk</h3>
-      {selectedChunkDetail ? (
-        <>
-          <div style={{ marginBottom: "0.5rem" }}>
-            <strong>ID:</strong> {selectedChunkDetail.chunk_id} |{" "}
-            <strong>Offsets:</strong> {selectedChunkDetail.doc_char_start}–
-            {selectedChunkDetail.doc_char_end}
-          </div>
-          <div
-            style={{
-              padding: "0.5rem",
-              background: "#fafafa",
-              border: "1px solid #eee",
-            }}
-          >
-            {interruptionResult &&
-            interruptionResult.chunk_id === selectedChunkDetail.chunk_id
-              ? highlightWord(
-                  selectedChunkDetail.text,
-                  interruptionResult.chunk_char_start,
-                  interruptionResult.chunk_char_end
-                )
-              : selectedChunkDetail.text}
-          </div>
-          <div style={{ marginTop: "0.5rem", fontSize: "0.9rem" }}>
-            Speech marks: {selectedChunkDetail.speech_marks.length}
-          </div>
-        </>
-      ) : (
-        <div>Select a chunk to see details.</div>
-      )}
-    </div>
-  );
+  const documentText = useMemo(() => {
+    if (!chunks.length) return "";
+    // Stitch known chunks; if some details missing, use preview fallback.
+    return chunks
+      .map((c) => {
+        const detail = chunkDetails[c.chunk_id];
+        return detail?.text ?? c.preview;
+      })
+      .join("\n\n");
+  }, [chunks, chunkDetails]);
 
   const statusPanel = status ? (
     <div style={{ marginBottom: "1rem" }}>
@@ -337,6 +293,10 @@ export default function App() {
       </div>
       <div>
         <strong>Chunking:</strong> {status.chunking_strategy}
+      </div>
+      <div>
+        <strong>Current chunk:</strong>{" "}
+        {selectedChunkId != null ? selectedChunkId : "none"}
       </div>
     </div>
   ) : (
@@ -353,65 +313,94 @@ export default function App() {
         </button>
         {micError && <span style={{ color: "red", marginLeft: "0.5rem" }}>{micError}</span>}
       </div>
-      <div style={{ display: "flex", gap: "1rem" }}>
-        <div style={{ width: "30%" }}>{chunkList}</div>
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-          {chunkDetailSection}
-          <div style={{ display: "flex", gap: "0.5rem" }}>
-            <button onClick={handlePlay} disabled={!micEnabled || isLoading}>
-              Play selected chunk
-            </button>
-            <button onClick={handleStop} disabled={!isPlaying}>
-              Stop
-            </button>
-            <button onClick={handleInterrupt} disabled={!isPlaying}>
-              Interrupt now
-            </button>
-            {isPlaying && <span>Playing chunk {selectedChunkId}</span>}
-            <span>
-              VAD:{" "}
-              {vadState === "listening"
-                ? "listening"
-                : vadState === "triggered"
-                ? "triggered"
-                : "idle"}
-              {vadState !== "idle" && (
-                <span style={{ marginLeft: "0.35rem" }}>
-                  RMS {vadRms.toFixed(3)} / thr {vadThreshold.toFixed(3)}
-                </span>
-              )}
-            </span>
+      <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+        <div
+          style={{
+            border: "1px solid #ccc",
+            padding: "0.75rem",
+            minHeight: "200px",
+          }}
+        >
+          <h3>Document</h3>
+          <div
+            style={{
+              padding: "0.5rem",
+              background: "#fafafa",
+              border: "1px solid #eee",
+              minHeight: "150px",
+            }}
+          >
+            {selectedChunkDetail &&
+            interruptionResult &&
+            interruptionResult.chunk_id === selectedChunkDetail.chunk_id
+              ? highlightWord(
+                  selectedChunkDetail.text,
+                  interruptionResult.chunk_char_start,
+                  interruptionResult.chunk_char_end
+                )
+              : documentText || "Loading document..."}
           </div>
-          <label style={{ display: "inline-block" }}>
-            VAD threshold (RMS):
-            <input
-              type="number"
-              step="0.001"
-              min="0"
-              value={vadThreshold}
-              onChange={(e) => setVadThreshold(Number(e.target.value))}
-              style={{ marginLeft: "0.5rem" }}
-            />
-          </label>
-          {interruptionResult && (
-            <div style={{ border: "1px solid #ddd", padding: "0.5rem" }}>
-              <div><strong>Interruption result</strong></div>
-              <div>
-                Chunk {interruptionResult.chunk_id} @ {interruptionResult.elapsed_ms} ms
-              </div>
-              <div>
-                Word: <strong>{interruptionResult.word_text}</strong> ({interruptionResult.doc_char_start}–
-                {interruptionResult.doc_char_end})
-              </div>
+        </div>
+
+        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+          <button onClick={handlePlay} disabled={!micEnabled || isLoading}>
+            {isPlaying ? "Restart playback" : "Play"}
+          </button>
+          <button onClick={handleStop} disabled={!isPlaying}>
+            Stop
+          </button>
+          <button onClick={handleInterrupt} disabled={!isPlaying}>
+            Interrupt now
+          </button>
+          <button onClick={handleContinue} disabled={!micEnabled || isPlaying}>
+            Continue
+          </button>
+          {isPlaying && <span>Playing chunk {selectedChunkId}</span>}
+          <span>
+            VAD:{" "}
+            {vadState === "listening"
+              ? "listening"
+              : vadState === "triggered"
+              ? "triggered"
+              : "idle"}
+            {vadState !== "idle" && (
+              <span style={{ marginLeft: "0.35rem" }}>
+                RMS {vadRms.toFixed(3)} / thr {vadThreshold.toFixed(3)}
+              </span>
+            )}
+          </span>
+        </div>
+
+        <label style={{ display: "inline-block" }}>
+          VAD threshold (RMS):
+          <input
+            type="number"
+            step="0.001"
+            min="0"
+            value={vadThreshold}
+            onChange={(e) => setVadThreshold(Number(e.target.value))}
+            style={{ marginLeft: "0.5rem" }}
+          />
+        </label>
+
+        {interruptionResult && (
+          <div style={{ border: "1px solid #ddd", padding: "0.5rem" }}>
+            <div><strong>Interruption result</strong></div>
+            <div>
+              Chunk {interruptionResult.chunk_id} @ {interruptionResult.elapsed_ms} ms
             </div>
-          )}
-          {error && <div style={{ color: "red" }}>{error.message}</div>}
-          <div aria-live="polite" style={{ position: "absolute", left: "-9999px" }}>
-            {liveMessage ||
-              (vadState === "triggered"
-                ? "Voice activity detected."
-                : `VAD state ${vadState}, RMS ${vadRms.toFixed(3)}, threshold ${vadThreshold.toFixed(3)}`)}
+            <div>
+              Word: <strong>{interruptionResult.word_text}</strong> ({interruptionResult.doc_char_start}–
+              {interruptionResult.doc_char_end})
+            </div>
           </div>
+        )}
+        {error && <div style={{ color: "red" }}>{error.message}</div>}
+        <div aria-live="polite" style={{ position: "absolute", left: "-9999px" }}>
+          {liveMessage ||
+            (vadState === "triggered"
+              ? "Voice activity detected."
+              : `VAD state ${vadState}, RMS ${vadRms.toFixed(3)}, threshold ${vadThreshold.toFixed(3)}`)}
         </div>
       </div>
     </div>
