@@ -44,6 +44,9 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [autoPlayPending, setAutoPlayPending] = useState(false);
+  const [pendingPlay, setPendingPlay] = useState<
+    { chunkId: number; offsetMs: number } | null
+  >(null);
   const [vadState, setVadState] = useState<"idle" | "listening" | "triggered">(
     "idle"
   );
@@ -55,6 +58,7 @@ export default function App() {
   const audioEngineRef = useRef<AudioEngine | null>(null);
   const audioBuffersRef = useRef<Map<number, AudioBuffer>>(new Map());
   const isPlayingRef = useRef(false);
+  const stopReasonRef = useRef<"natural" | "manual" | "interrupt">("natural");
   const vadProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const vadCountersRef = useRef<{ aboveCount: number }>({ aboveCount: 0 });
   const vadTriggeredRef = useRef(false);
@@ -103,11 +107,12 @@ export default function App() {
 
   // Auto-start playback once mic is enabled and we have a chunk.
   useEffect(() => {
-    if (micEnabled && selectedChunkId != null && autoPlayPending) {
-      handlePlay();
+    if (micEnabled && pendingPlay && selectedChunkId != null) {
+      startPlaybackAt(pendingPlay.chunkId, pendingPlay.offsetMs);
+      setPendingPlay(null);
       setAutoPlayPending(false);
     }
-  }, [micEnabled, selectedChunkId, autoPlayPending]);
+  }, [micEnabled, pendingPlay, selectedChunkId]);
 
   const selectedChunkDetail = useMemo(() => {
     if (selectedChunkId == null) return null;
@@ -176,7 +181,18 @@ export default function App() {
       audioContextRef.current = context;
       audioEngineRef.current = new AudioEngine(context);
       setMicEnabled(true);
-      setAutoPlayPending(true);
+      // Auto-play from start (or pending point) once mic is ready.
+      const targetChunk =
+        pendingPlay?.chunkId ??
+        selectedChunkId ??
+        (chunks.length ? chunks[0].chunk_id : null);
+      if (targetChunk != null) {
+        setPendingPlay({
+          chunkId: targetChunk,
+          offsetMs: pendingPlay?.offsetMs ?? 0,
+        });
+        setAutoPlayPending(true);
+      }
     } catch (err) {
       const message = (err as Error).message || "Failed to enable microphone";
       setMicError(message);
@@ -196,24 +212,29 @@ export default function App() {
     return buffer;
   }
 
-  async function handlePlay() {
-    if (!micEnabled || !audioEngineRef.current || !audioContextRef.current) return;
-    if (selectedChunkId == null) return;
+  async function startPlaybackAt(chunkId: number, offsetMs = 0) {
+    if (!micEnabled || !audioEngineRef.current || !audioContextRef.current) {
+      setPendingPlay({ chunkId, offsetMs });
+      setAutoPlayPending(true);
+      return;
+    }
     setError(null);
     setIsLoading(true);
     try {
-      const buffer = await loadAudioBuffer(selectedChunkId);
+      setSelectedChunkId(chunkId);
+      stopReasonRef.current = "natural";
+      const buffer = await loadAudioBuffer(chunkId);
       await audioContextRef.current.resume();
-      audioEngineRef.current.playChunk(selectedChunkId, buffer, () => {
-        setIsPlaying(false);
-        isPlayingRef.current = false;
-        setVadState("idle");
+      const offsetSec = Math.max(0, offsetMs) / 1000;
+      audioEngineRef.current.playChunk(chunkId, buffer, offsetSec, () => {
+        handleChunkEnded(chunkId);
       });
       setIsPlaying(true);
       isPlayingRef.current = true;
       setVadState("listening");
       vadCountersRef.current.aboveCount = 0;
       vadTriggeredRef.current = false;
+      setInterruptionResult(null);
     } catch (err) {
       setError({ message: (err as Error).message });
     } finally {
@@ -221,7 +242,30 @@ export default function App() {
     }
   }
 
+  function handlePlay() {
+    if (selectedChunkId == null) return;
+    startPlaybackAt(selectedChunkId, 0);
+  }
+
+  function handleChunkEnded(finishedChunkId: number) {
+    setIsPlaying(false);
+    isPlayingRef.current = false;
+    setVadState("idle");
+    if (stopReasonRef.current !== "natural") {
+      stopReasonRef.current = "natural";
+      return;
+    }
+    stopReasonRef.current = "natural";
+    // Auto-advance to next chunk if available.
+    const nextIndex = chunks.findIndex((c) => c.chunk_id === finishedChunkId) + 1;
+    if (nextIndex > 0 && nextIndex < chunks.length) {
+      const nextChunkId = chunks[nextIndex].chunk_id;
+      startPlaybackAt(nextChunkId, 0);
+    }
+  }
+
   function handleStop() {
+    stopReasonRef.current = "manual";
     audioEngineRef.current?.stop();
     setIsPlaying(false);
     isPlayingRef.current = false;
@@ -239,6 +283,7 @@ export default function App() {
       setError({ message: "No active playback to interrupt." });
       return;
     }
+    stopReasonRef.current = "interrupt";
     engine.stop();
     setIsPlaying(false);
     isPlayingRef.current = false;
@@ -258,6 +303,7 @@ export default function App() {
   }
 
   async function handleInterrupt() {
+    stopReasonRef.current = "interrupt";
     interruptPlayback("manual");
   }
 
@@ -268,8 +314,20 @@ export default function App() {
 
   function handleContinue() {
     if (!micEnabled) return;
-    setInterruptionResult(null);
-    handlePlay();
+    if (!interruptionResult) {
+      setError({ message: "No interruption to continue from." });
+      return;
+    }
+    // Confirm with server (callback) then resume from interruption point.
+    const payload = {
+      chunk_id: interruptionResult.chunk_id,
+      elapsed_ms: interruptionResult.elapsed_ms,
+    };
+    postInterruption(payload)
+      .then(() => {
+        startPlaybackAt(payload.chunk_id, payload.elapsed_ms);
+      })
+      .catch((err) => setError({ message: (err as Error).message }));
   }
 
   const documentText = useMemo(() => {
@@ -314,7 +372,7 @@ export default function App() {
         {micError && <span style={{ color: "red", marginLeft: "0.5rem" }}>{micError}</span>}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-        <div
+        <section
           style={{
             border: "1px solid #ccc",
             padding: "0.75rem",
@@ -340,9 +398,16 @@ export default function App() {
                 )
               : documentText || "Loading document..."}
           </div>
-        </div>
+        </section>
 
-        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+        <section
+          style={{
+            display: "flex",
+            gap: "0.5rem",
+            flexWrap: "wrap",
+            alignItems: "center",
+          }}
+        >
           <button onClick={handlePlay} disabled={!micEnabled || isLoading}>
             {isPlaying ? "Restart playback" : "Play"}
           </button>
@@ -352,8 +417,11 @@ export default function App() {
           <button onClick={handleInterrupt} disabled={!isPlaying}>
             Interrupt now
           </button>
-          <button onClick={handleContinue} disabled={!micEnabled || isPlaying}>
-            Continue
+          <button
+            onClick={handleContinue}
+            disabled={!micEnabled || isPlaying || !interruptionResult}
+          >
+            Continue from last interruption
           </button>
           {isPlaying && <span>Playing chunk {selectedChunkId}</span>}
           <span>
@@ -369,7 +437,7 @@ export default function App() {
               </span>
             )}
           </span>
-        </div>
+        </section>
 
         <label style={{ display: "inline-block" }}>
           VAD threshold (RMS):

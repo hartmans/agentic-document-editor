@@ -9,6 +9,7 @@ export class AudioEngine {
   private sourceNode: AudioBufferSourceNode | null = null;
   private playingChunkId: number | null = null;
   private chunkStartTime: number | null = null;
+  private onEndedCallback: (() => void) | null = null;
 
   constructor(audioContext: AudioContext) {
     this.audioContext = audioContext;
@@ -17,9 +18,11 @@ export class AudioEngine {
   playChunk(
     chunkId: number,
     buffer: AudioBuffer,
+    startOffsetSec = 0,
     onEnded?: () => void
   ): void {
     this.stop();
+    this.onEndedCallback = onEnded || null;
     const source = this.audioContext.createBufferSource();
     source.buffer = buffer;
     source.connect(this.audioContext.destination);
@@ -27,12 +30,15 @@ export class AudioEngine {
       this.sourceNode = null;
       this.playingChunkId = null;
       this.chunkStartTime = null;
-      if (onEnded) onEnded();
+      const cb = this.onEndedCallback;
+      this.onEndedCallback = null;
+      if (cb) cb();
     };
-    source.start();
+    source.start(0, startOffsetSec);
     this.sourceNode = source;
     this.playingChunkId = chunkId;
-    this.chunkStartTime = this.audioContext.currentTime;
+    // Track start time relative to the buffer timeline so elapsed calculation accounts for offsets.
+    this.chunkStartTime = this.audioContext.currentTime - startOffsetSec;
   }
 
   stop(): void {
