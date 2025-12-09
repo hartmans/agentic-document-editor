@@ -47,10 +47,28 @@ export default function App() {
   const [micError, setMicError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [vadState, setVadState] = useState<"idle" | "listening" | "triggered">(
+    "idle"
+  );
+  const [vadThreshold, setVadThreshold] = useState(0.005);
+  const [vadRms, setVadRms] = useState(0);
+  const [liveMessage, setLiveMessage] = useState("");
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioEngineRef = useRef<AudioEngine | null>(null);
   const audioBuffersRef = useRef<Map<number, AudioBuffer>>(new Map());
+  const isPlayingRef = useRef(false);
+  const vadProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const vadCountersRef = useRef<{ aboveCount: number }>({ aboveCount: 0 });
+  const vadTriggeredRef = useRef(false);
+  const vadThresholdRef = useRef(vadThreshold);
+
+  const VAD_MIN_FRAMES = 4; // number of frames above threshold to trigger (~90ms)
+  const VAD_FRAME_MS = 23; // approximate with 1024 buffer at 44.1kHz
+
+  useEffect(() => {
+    vadThresholdRef.current = vadThreshold;
+  }, [vadThreshold]);
 
   useEffect(() => {
     const loadInitial = async () => {
@@ -94,14 +112,62 @@ export default function App() {
   async function enableMic() {
     setMicError(null);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+      });
       const context =
         audioContextRef.current || new AudioContext({ latencyHint: "interactive" });
       await context.resume();
-      // Connect mic to context graph to keep it alive; audio not used yet.
+      // Set up simple VAD using ScriptProcessorNode.
       const source = context.createMediaStreamSource(stream);
-      source.connect(context.destination);
-
+      const processor =
+        vadProcessorRef.current ||
+        context.createScriptProcessor(1024, 1, 1); // ~23ms at 44.1k
+      processor.onaudioprocess = (event) => {
+        const input = event.inputBuffer.getChannelData(0);
+        let sumSquares = 0;
+        for (let i = 0; i < input.length; i++) {
+          sumSquares += input[i] * input[i];
+        }
+        const rms = Math.sqrt(sumSquares / input.length);
+        setVadRms(rms);
+        const threshold = vadThresholdRef.current;
+        const isAbove = rms >= threshold;
+        const counters = vadCountersRef.current;
+        if (!isPlayingRef.current) {
+          counters.aboveCount = 0;
+          vadTriggeredRef.current = false;
+          setVadState("idle");
+          return;
+        }
+        setVadState("listening");
+        if (isAbove) {
+          counters.aboveCount += 1;
+        } else {
+          counters.aboveCount = Math.max(0, counters.aboveCount - 1);
+        }
+        const sustainedMs = counters.aboveCount * VAD_FRAME_MS;
+        if (
+          !vadTriggeredRef.current &&
+          sustainedMs >= VAD_MIN_FRAMES * VAD_FRAME_MS
+        ) {
+          vadTriggeredRef.current = true;
+          setVadState("triggered");
+          handleAutoInterrupt();
+        }
+      };
+      source.connect(processor);
+      // Processor needs a destination to run; use a gain node at 0 to avoid feedback.
+      const gain = context.createGain();
+      gain.gain.value = 0;
+      processor.connect(gain);
+      gain.connect(context.destination);
+      vadProcessorRef.current = processor;
       audioContextRef.current = context;
       audioEngineRef.current = new AudioEngine(context);
       setMicEnabled(true);
@@ -134,8 +200,14 @@ export default function App() {
       await audioContextRef.current.resume();
       audioEngineRef.current.playChunk(selectedChunkId, buffer, () => {
         setIsPlaying(false);
+        isPlayingRef.current = false;
+        setVadState("idle");
       });
       setIsPlaying(true);
+      isPlayingRef.current = true;
+      setVadState("listening");
+      vadCountersRef.current.aboveCount = 0;
+      vadTriggeredRef.current = false;
     } catch (err) {
       setError({ message: (err as Error).message });
     } finally {
@@ -146,11 +218,13 @@ export default function App() {
   function handleStop() {
     audioEngineRef.current?.stop();
     setIsPlaying(false);
+    isPlayingRef.current = false;
+    setVadState("idle");
   }
 
-  async function handleInterrupt() {
+  async function interruptPlayback(source: "manual" | "vad") {
     const engine = audioEngineRef.current;
-    if (!engine || !isPlaying) {
+    if (!engine || !isPlayingRef.current) {
       setError({ message: "No chunk is currently playing." });
       return;
     }
@@ -161,6 +235,8 @@ export default function App() {
     }
     engine.stop();
     setIsPlaying(false);
+    isPlayingRef.current = false;
+    setVadState(source === "vad" ? "triggered" : "idle");
     const elapsedMs = Math.round(
       (info.contextCurrentTime - info.chunkStartTime) * 1000
     );
@@ -173,6 +249,15 @@ export default function App() {
     } catch (err) {
       setError({ message: (err as Error).message });
     }
+  }
+
+  async function handleInterrupt() {
+    interruptPlayback("manual");
+  }
+
+  async function handleAutoInterrupt() {
+    interruptPlayback("vad");
+    setLiveMessage("Auto interruption detected and sent to server.");
   }
 
   const chunkList = (
@@ -283,7 +368,31 @@ export default function App() {
               Interrupt now
             </button>
             {isPlaying && <span>Playing chunk {selectedChunkId}</span>}
+            <span>
+              VAD:{" "}
+              {vadState === "listening"
+                ? "listening"
+                : vadState === "triggered"
+                ? "triggered"
+                : "idle"}
+              {vadState !== "idle" && (
+                <span style={{ marginLeft: "0.35rem" }}>
+                  RMS {vadRms.toFixed(3)} / thr {vadThreshold.toFixed(3)}
+                </span>
+              )}
+            </span>
           </div>
+          <label style={{ display: "inline-block" }}>
+            VAD threshold (RMS):
+            <input
+              type="number"
+              step="0.001"
+              min="0"
+              value={vadThreshold}
+              onChange={(e) => setVadThreshold(Number(e.target.value))}
+              style={{ marginLeft: "0.5rem" }}
+            />
+          </label>
           {interruptionResult && (
             <div style={{ border: "1px solid #ddd", padding: "0.5rem" }}>
               <div><strong>Interruption result</strong></div>
@@ -297,6 +406,12 @@ export default function App() {
             </div>
           )}
           {error && <div style={{ color: "red" }}>{error.message}</div>}
+          <div aria-live="polite" style={{ position: "absolute", left: "-9999px" }}>
+            {liveMessage ||
+              (vadState === "triggered"
+                ? "Voice activity detected."
+                : `VAD state ${vadState}, RMS ${vadRms.toFixed(3)}, threshold ${vadThreshold.toFixed(3)}`)}
+          </div>
         </div>
       </div>
     </div>
