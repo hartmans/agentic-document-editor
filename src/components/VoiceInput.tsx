@@ -25,12 +25,11 @@ export function VoiceInput({ onInterrupt, onMicReady, disabled }: VoiceInputProp
   const aboveCountRef = useRef(0);
   const triggeredRef = useRef(false);
 
-  // Preroll ring buffer (~250ms)
-  const prerollBufferRef = useRef<Float32Array>(new Float32Array(48000)); // 1s at 48k
+  // Preroll ring buffer (~250ms). Re-sized when mic starts based on sampleRate.
+  const prerollBufferRef = useRef<Float32Array>(new Float32Array(12000));
   const prerollWriteIdxRef = useRef(0);
 
   const VAD_MIN_FRAMES = 4;
-  const VAD_FRAME_MS = 23;
 
   useEffect(() => {
     return () => {
@@ -54,6 +53,9 @@ export function VoiceInput({ onInterrupt, onMicReady, disabled }: VoiceInputProp
         audioContextRef.current || new AudioContext({ latencyHint: "interactive" });
       await ctx.resume();
       const source = ctx.createMediaStreamSource(stream);
+      const prerollSamples = Math.max(1, Math.round(ctx.sampleRate * 0.25));
+      prerollBufferRef.current = new Float32Array(prerollSamples);
+      prerollWriteIdxRef.current = 0;
       const processor =
         processorRef.current || ctx.createScriptProcessor(1024, 1, 1);
       processor.onaudioprocess = (event) => {
@@ -84,8 +86,7 @@ export function VoiceInput({ onInterrupt, onMicReady, disabled }: VoiceInputProp
         if (isAbove) aboveCountRef.current += 1;
         else aboveCountRef.current = Math.max(0, aboveCountRef.current - 1);
 
-        const sustainedMs = aboveCountRef.current * VAD_FRAME_MS;
-        if (!triggeredRef.current && sustainedMs >= VAD_MIN_FRAMES * VAD_FRAME_MS) {
+        if (!triggeredRef.current && aboveCountRef.current >= VAD_MIN_FRAMES) {
           triggeredRef.current = true;
           setVadState("triggered");
           onInterrupt();
