@@ -13,12 +13,15 @@ def sample_document(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
-def document_state(sample_document):
-    path, doc_text = sample_document
+def document_state(sample_document, tmp_path_factory):
+    _path, doc_text = sample_document
+    cache_dir = tmp_path_factory.mktemp("cache")
     return tts_server.build_document_state(
         document_text=doc_text,
         voice_id="Joanna",
         chunking_strategy="paragraph",
+        region_name="us-east-1",
+        cache_dir=cache_dir,
     )
 
 
@@ -28,9 +31,7 @@ def test_chunking_and_mapping(document_state):
     first = document_state.chunks[0]
     mapping = tts_server.map_elapsed_time_to_document(first, elapsed_ms=0)
     assert mapping["chunk_id"] == 0
-    assert mapping["word_text"].lower().startswith("hello")
-    assert mapping["doc_char_start"] == first.doc_char_start
-    assert mapping["doc_char_end"] > mapping["doc_char_start"]
+    assert mapping["doc_char_position"] == first.doc_char_start
 
 
 def test_api_endpoints(document_state):
@@ -41,17 +42,10 @@ def test_api_endpoints(document_state):
     assert status_resp.status_code == 200
     assert status_resp.json()["chunk_count"] == 2
 
-    chunks_resp = client.get("/chunks")
-    assert chunks_resp.status_code == 200
-    chunks = chunks_resp.json()
-    assert len(chunks) == 2
-    assert chunks[0]["chunk_id"] == 0
-
-    detail_resp = client.get("/chunks/0")
-    assert detail_resp.status_code == 200
-    detail = detail_resp.json()
-    assert detail["chunk_id"] == 0
-    assert detail["speech_marks"]
+    doc_resp = client.get("/document")
+    assert doc_resp.status_code == 200
+    doc = doc_resp.json()
+    assert doc["chunks"][0]["chunk_id"] == 0
 
     audio_resp = client.get("/chunks/0/audio")
     assert audio_resp.status_code == 200
@@ -61,4 +55,4 @@ def test_api_endpoints(document_state):
     assert interrupt_resp.status_code == 200
     interrupt = interrupt_resp.json()
     assert interrupt["chunk_id"] == 0
-    assert interrupt["doc_char_start"] >= 0
+    assert interrupt["doc_char_position"] >= 0

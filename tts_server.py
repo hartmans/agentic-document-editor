@@ -7,14 +7,13 @@ interruption-to-text mapping.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
-from bisect import bisect_right
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import List, Sequence
 
 import boto3
+from agentic_editor.tts_cache import TtsCache
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -59,12 +58,6 @@ class DocumentState:
     chunking_strategy: str
     chunks: List[TextChunk] = field(default_factory=list)
 
-    def get_chunk(self, chunk_id: int) -> TextChunk:
-        try:
-            return self.chunks[chunk_id]
-        except IndexError as exc:
-            raise KeyError(f"Unknown chunk_id {chunk_id}") from exc
-
 
 # ----------------------------- Chunking ------------------------------------ #
 
@@ -103,91 +96,28 @@ def chunk_document_paragraphs(document: str) -> List[tuple[int, int]]:
     return spans
 
 
-# ----------------------------- Polly helpers ------------------------------- #
-
-
-def _call_polly(
-    client,
-    *,
-    text: str,
-    voice_id: str,
-    output_format: str,
-    speech_mark_types: Optional[List[str]] = None,
-) -> dict:
-    """Call Polly, preferring neural engine when available, falling back to standard."""
-    base_params = {
-        "Text": text,
-        "VoiceId": voice_id,
-        "OutputFormat": output_format,
-    }
-    if speech_mark_types:
-        base_params["SpeechMarkTypes"] = speech_mark_types
-
-    # Attempt neural engine first.
-    try:
-        return client.synthesize_speech(**base_params, Engine="neural")
-    except ClientError as err:
-        logging.warning("Neural engine unavailable, falling back to standard: %s", err)
-    # Fall back to standard engine.
-    return client.synthesize_speech(**base_params)
-
-
-def synthesize_audio(client, text: str, voice_id: str) -> bytes:
-    response = _call_polly(client, text=text, voice_id=voice_id, output_format="mp3")
-    stream = response.get("AudioStream")
-    if stream is None:
-        raise RuntimeError("Polly response missing AudioStream for audio synthesis")
-    return stream.read()
-
-
-def synthesize_speech_marks(client, text: str, voice_id: str) -> List[SpeechMark]:
-    response = _call_polly(
-        client,
-        text=text,
-        voice_id=voice_id,
-        output_format="json",
-        speech_mark_types=["word", "sentence"],
-    )
-    stream = response.get("AudioStream")
-    if stream is None:
-        raise RuntimeError("Polly response missing AudioStream for speech marks")
-    raw = stream.read().decode("utf-8")
-    lines = [line for line in raw.splitlines() if line.strip()]
-    return list(_parse_speech_mark_lines(lines, text))
-
-
-def _byte_to_char_offset(byte_offset: int, cumulative_bytes: List[int]) -> int:
-    """Translate a byte offset into a character offset using cumulative byte counts."""
-    idx = bisect_right(cumulative_bytes, byte_offset) - 1
-    return max(idx, 0)
-
-
-def _parse_speech_mark_lines(
-    lines: Iterable[str], chunk_text: str
-) -> Iterable[SpeechMark]:
-    cumulative_bytes: List[int] = [0]
-    for ch in chunk_text:
-        cumulative_bytes.append(cumulative_bytes[-1] + len(ch.encode("utf-8")))
-
-    for line in lines:
-        data = json.loads(line)
-        mark_type = data.get("type")
-        if mark_type not in {"word", "sentence"}:
-            continue
-        start_byte = int(data.get("start", 0))
-        end_byte = int(data.get("end", start_byte))
-        chunk_char_start = _byte_to_char_offset(start_byte, cumulative_bytes)
-        chunk_char_end = _byte_to_char_offset(end_byte, cumulative_bytes)
-        yield SpeechMark(
-            time_ms=int(data["time"]),
-            mark_type=mark_type,
-            text=data.get("value", ""),
-            chunk_char_start=chunk_char_start,
-            chunk_char_end=chunk_char_end,
-        )
 
 
 # ----------------------------- Mapping logic ------------------------------- #
+
+
+def _speech_marks_from_records(records: Sequence[dict]) -> List[SpeechMark]:
+    marks: List[SpeechMark] = []
+    for rec in records:
+        try:
+            marks.append(
+                SpeechMark(
+                    time_ms=int(rec["time_ms"]),
+                    mark_type=str(rec["mark_type"]),
+                    text=str(rec.get("text", "")),
+                    chunk_char_start=int(rec["chunk_char_start"]),
+                    chunk_char_end=int(rec["chunk_char_end"]),
+                )
+            )
+        except (KeyError, ValueError, TypeError):
+            continue
+    marks.sort(key=lambda m: m.time_ms)
+    return marks
 
 
 def map_elapsed_time_to_document(chunk: TextChunk, elapsed_ms: int) -> dict:
@@ -212,38 +142,24 @@ def map_elapsed_time_to_document(chunk: TextChunk, elapsed_ms: int) -> dict:
     return {
         "chunk_id": chunk.chunk_id,
         "elapsed_ms": elapsed_ms,
-        "word_text": target_mark.text,
-        "chunk_char_start": target_mark.chunk_char_start,
-        "chunk_char_end": target_mark.chunk_char_end,
-        "doc_char_start": chunk.doc_char_start + target_mark.chunk_char_start,
-        "doc_char_end": chunk.doc_char_start + target_mark.chunk_char_end,
+        "doc_char_position": chunk.doc_char_start + target_mark.chunk_char_start,
     }
 
 
 # ----------------------------- FastAPI models ------------------------------ #
 
 
-class SpeechMarkModel(BaseModel):
-    time_ms: int
-    mark_type: str
-    text: str
-    chunk_char_start: int
-    chunk_char_end: int
-
-
-class ChunkMetadataModel(BaseModel):
+class DocumentChunkModel(BaseModel):
     chunk_id: int
     doc_char_start: int
     doc_char_end: int
-    preview: str
 
 
-class ChunkDetailModel(BaseModel):
-    chunk_id: int
-    text: str
-    doc_char_start: int
-    doc_char_end: int
-    speech_marks: List[SpeechMarkModel]
+class DocumentResponseModel(BaseModel):
+    document: str
+    chunks: List[DocumentChunkModel]
+    voice_id: str
+    chunking_strategy: str
 
 
 class InterruptionRequest(BaseModel):
@@ -254,11 +170,7 @@ class InterruptionRequest(BaseModel):
 class InterruptionResponse(BaseModel):
     chunk_id: int
     elapsed_ms: int
-    word_text: str
-    chunk_char_start: int
-    chunk_char_end: int
-    doc_char_start: int
-    doc_char_end: int
+    doc_char_position: int
 
 
 # ----------------------------- FastAPI app --------------------------------- #
@@ -284,55 +196,36 @@ def create_app(state: DocumentState) -> FastAPI:
             "chunking_strategy": state.chunking_strategy,
         }
 
-    @app.get("/chunks", response_model=List[ChunkMetadataModel])
-    def list_chunks():
-        return [
-            ChunkMetadataModel(
-                chunk_id=chunk.chunk_id,
-                doc_char_start=chunk.doc_char_start,
-                doc_char_end=chunk.doc_char_end,
-                preview=chunk.text[:80],
-            )
-            for chunk in state.chunks
-        ]
-
-    @app.get("/chunks/{chunk_id}", response_model=ChunkDetailModel)
-    def get_chunk(chunk_id: int):
-        try:
-            chunk = state.get_chunk(chunk_id)
-        except KeyError:
-            raise HTTPException(status_code=404, detail="Unknown chunk_id")
-        return ChunkDetailModel(
-            chunk_id=chunk.chunk_id,
-            text=chunk.text,
-            doc_char_start=chunk.doc_char_start,
-            doc_char_end=chunk.doc_char_end,
-            speech_marks=[
-                SpeechMarkModel(
-                    time_ms=mark.time_ms,
-                    mark_type=mark.mark_type,
-                    text=mark.text,
-                    chunk_char_start=mark.chunk_char_start,
-                    chunk_char_end=mark.chunk_char_end,
+    @app.get("/document", response_model=DocumentResponseModel)
+    def get_document():
+        return DocumentResponseModel(
+            document=state.original_text,
+            chunks=[
+                DocumentChunkModel(
+                    chunk_id=c.chunk_id,
+                    doc_char_start=c.doc_char_start,
+                    doc_char_end=c.doc_char_end,
                 )
-                for mark in chunk.speech_marks
+                for c in state.chunks
             ],
+            voice_id=state.voice_id,
+            chunking_strategy=state.chunking_strategy,
         )
 
     @app.get("/chunks/{chunk_id}/audio")
     def get_chunk_audio(chunk_id: int):
         try:
-            chunk = state.get_chunk(chunk_id)
-        except KeyError:
-            raise HTTPException(status_code=404, detail="Unknown chunk_id")
+            chunk = state.chunks[chunk_id]
+        except IndexError:
+            raise HTTPException(status_code=404, detail="Unknown chunk_id") from None
         return Response(content=chunk.audio_bytes, media_type=chunk.audio_mime_type)
 
     @app.post("/interruptions", response_model=InterruptionResponse)
     def map_interruption(request: InterruptionRequest):
         try:
-            chunk = state.get_chunk(request.chunk_id)
-        except KeyError:
-            raise HTTPException(status_code=404, detail="Unknown chunk_id")
+            chunk = state.chunks[request.chunk_id]
+        except IndexError:
+            raise HTTPException(status_code=404, detail="Unknown chunk_id") from None
         mapping = map_elapsed_time_to_document(chunk, request.elapsed_ms)
         return InterruptionResponse(**mapping)
 
@@ -349,23 +242,31 @@ def load_document(path: Path) -> str:
 
 
 def build_document_state(
-    document_text: str, voice_id: str, chunking_strategy: str, region_name: str
+    document_text: str,
+    voice_id: str,
+    chunking_strategy: str,
+    region_name: str,
+    cache_dir: Path,
 ) -> DocumentState:
     if chunking_strategy != "paragraph":
         raise ValueError(f"Unsupported chunking strategy: {chunking_strategy}")
 
     chunk_spans = chunk_document_paragraphs(document_text)
-    polly_client = boto3.client("polly", region_name=region_name)
+    session = boto3.Session()
+    tts_cache = TtsCache(
+        cache_dir=cache_dir,
+        boto_session=session,
+        region_name=region_name,
+        voice_id=voice_id,
+    )
     chunks: List[TextChunk] = []
 
     for chunk_id, (start, end) in enumerate(chunk_spans):
         text = document_text[start:end]
         logging.info("Synthesizing chunk %s (%s chars)", chunk_id, len(text))
         try:
-            audio_bytes = synthesize_audio(polly_client, text=text, voice_id=voice_id)
-            speech_marks = synthesize_speech_marks(
-                polly_client, text=text, voice_id=voice_id
-            )
+            audio_bytes, speech_mark_records = tts_cache[text]
+            speech_marks = _speech_marks_from_records(speech_mark_records)
         except (BotoCoreError, ClientError, RuntimeError) as exc:
             logging.error("Polly synthesis failed for chunk %s: %s", chunk_id, exc)
             raise
@@ -414,6 +315,11 @@ def parse_args() -> argparse.Namespace:
         help="Chunking strategy to use (default: paragraph).",
     )
     parser.add_argument(
+        "--cache-dir",
+        default=".tts_cache",
+        help="Directory to store/retrieve cached TTS assets (default: .tts_cache).",
+    )
+    parser.add_argument(
         "--host",
         default="0.0.0.0",
         help="Host for uvicorn to bind (default: 0.0.0.0).",
@@ -441,6 +347,7 @@ def main():
             voice_id=args.voice_id,
             chunking_strategy=args.chunking_strategy,
             region_name=args.region,
+            cache_dir=Path(args.cache_dir),
         )
     except Exception as exc:
         logging.error("Failed to preprocess document: %s", exc)
