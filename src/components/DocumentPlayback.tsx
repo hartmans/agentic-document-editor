@@ -52,9 +52,7 @@ export function DocumentPlayback({
     const audioEngineRef = useRef<AudioEngine | null>(null);
     const buffersRef = useRef<Map<number, AudioBuffer>>(new Map());
     const [currentChunkId, setCurrentChunkId] = useState<number | null>(null);
-    const [highlightRange, setHighlightRange] = useState<{ start: number; end: number }>(
-      { start: 0, end: 0 }
-    );
+    const [highlightStart, setHighlightStart] = useState<number | null>(null);
     const playingRef = useRef(false);
     const startTimeRef = useRef<number | null>(null);
 
@@ -79,11 +77,15 @@ export function DocumentPlayback({
       return buf;
     }
 
-    async function startChunk(chunkId: number, offsetMs = 0) {
+    async function startChunk(chunkId: number, offsetMs = 0, docCharPosition?: number | null) {
       if (!audioEngineRef.current || !audioContext) return;
       const buffer = await loadBuffer(chunkId);
       const chunk = chunks[chunkId];
-      if (chunk) setHighlightRange({ start: chunk.doc_char_start, end: chunk.doc_char_end });
+      if (chunk) {
+        const startPos =
+          docCharPosition != null ? docCharPosition : chunk.doc_char_start;
+        setHighlightStart(startPos);
+      }
       audioEngineRef.current.playChunk(chunkId, buffer, offsetMs / 1000, () =>
         handleNaturalEnd(chunkId)
       );
@@ -96,7 +98,7 @@ export function DocumentPlayback({
     function handleNaturalEnd(finishedId: number) {
       const nextId = finishedId + 1;
       if (nextId < chunks.length) {
-        startChunk(nextId, 0);
+        startChunk(nextId, 0, chunks[nextId].doc_char_start);
       } else {
         playingRef.current = false;
         startTimeRef.current = null;
@@ -112,10 +114,7 @@ export function DocumentPlayback({
           ? Math.round((info.contextCurrentTime - info.chunkStartTime) * 1000)
           : 0;
       const chunkId = info?.playingChunkId ?? currentChunkId;
-      const docCharPosition =
-        chunkId != null && chunkId < chunks.length
-          ? chunks[chunkId].doc_char_start
-          : null;
+      const docCharPosition = null;
       playingRef.current = false;
       startTimeRef.current = null;
       onPlayingChange?.(false);
@@ -123,18 +122,33 @@ export function DocumentPlayback({
     }
 
     useImperativeHandle(ref, () => ({
-      play: async (resume?: ResumePoint) => {
+      play: async (resume?: ResumePoint | null) => {
         const targetChunk = resume?.chunkId ?? 0;
         const offset = resume?.offsetMs ?? 0;
-        await startChunk(targetChunk, offset);
+        const docPos =
+          resume?.docCharPosition ??
+          (targetChunk < chunks.length ? chunks[targetChunk].doc_char_start : undefined);
+        await startChunk(targetChunk, offset, docPos);
       },
       stop: () => stopPlayback(),
     }));
 
     const renderedText = useMemo(() => {
       if (!documentText) return "Loading document...";
-      const { start, end } = highlightRange;
-      if (start === end) return documentText;
+      const anchor = highlightStart;
+      if (anchor == null) return documentText;
+
+      // Find word starting at or after anchor.
+      const isWordChar = (ch: string) => /\w/.test(ch);
+      let start = anchor;
+      while (start < documentText.length && !isWordChar(documentText[start])) {
+        start += 1;
+      }
+      if (start >= documentText.length) return documentText;
+      let end = start;
+      while (end < documentText.length && isWordChar(documentText[end])) {
+        end += 1;
+      }
       return (
         <>
           {documentText.slice(0, start)}
@@ -142,7 +156,7 @@ export function DocumentPlayback({
           {documentText.slice(end)}
         </>
       );
-    }, [documentText, highlightRange]);
+    }, [documentText, highlightStart]);
 
     return (
       <section style={{ border: "1px solid #ccc", padding: "0.75rem" }}>
