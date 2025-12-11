@@ -1,42 +1,41 @@
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
+import { AudioCtx } from "../context/AudioContextProvider";
 
 type VadState = "idle" | "listening" | "triggered";
 
 interface VoiceInputProps {
   onInterrupt: () => void;
-  onMicReady: (ctx: AudioContext) => void;
   disabled?: boolean;
 }
 
 /**
- * VoiceInput handles mic permission, simple VAD, and maintains a preroll ring buffer
- * (currently unused externally, but ready for STT wiring). It signals interruptions
- * via onInterrupt when VAD fires or when the user presses the button.
- */
-export function VoiceInput({ onInterrupt, onMicReady, disabled }: VoiceInputProps) {
+  * Handles mic permission, simple VAD, and a 250ms preroll ring buffer.
+  * Decoupled from playback; emits onInterrupt when VAD fires or button pressed.
+  */
+export function VoiceInput({ onInterrupt, disabled }: VoiceInputProps) {
+  const { audioContext, setAudioContext } = useContext(AudioCtx);
   const [micEnabled, setMicEnabled] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
   const [vadState, setVadState] = useState<VadState>("idle");
   const [vadThreshold, setVadThreshold] = useState(0.005);
   const [rms, setRms] = useState(0);
 
-  const audioContextRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const aboveCountRef = useRef(0);
   const triggeredRef = useRef(false);
 
-  // Preroll ring buffer (~250ms). Re-sized when mic starts based on sampleRate.
+  // Preroll ring buffer (~250ms)
   const prerollBufferRef = useRef<Float32Array>(new Float32Array(12000));
   const prerollWriteIdxRef = useRef(0);
 
-  const VAD_MIN_FRAMES = 4;
+  const VAD_MIN_FRAMES = 4; // frames above threshold required
 
   useEffect(() => {
     return () => {
       processorRef.current?.disconnect();
-      audioContextRef.current?.close();
+      audioContext?.close();
     };
-  }, []);
+  }, [audioContext]);
 
   async function enableMic() {
     setMicError(null);
@@ -50,12 +49,14 @@ export function VoiceInput({ onInterrupt, onMicReady, disabled }: VoiceInputProp
         },
       });
       const ctx =
-        audioContextRef.current || new AudioContext({ latencyHint: "interactive" });
+        audioContext ?? new AudioContext({ latencyHint: "interactive" });
       await ctx.resume();
       const source = ctx.createMediaStreamSource(stream);
+      // Resize preroll to ~250ms at current sample rate
       const prerollSamples = Math.max(1, Math.round(ctx.sampleRate * 0.25));
       prerollBufferRef.current = new Float32Array(prerollSamples);
       prerollWriteIdxRef.current = 0;
+
       const processor =
         processorRef.current || ctx.createScriptProcessor(1024, 1, 1);
       processor.onaudioprocess = (event) => {
@@ -93,16 +94,14 @@ export function VoiceInput({ onInterrupt, onMicReady, disabled }: VoiceInputProp
         }
       };
       source.connect(processor);
-      // Keep processor running with silent gain
       const gain = ctx.createGain();
       gain.gain.value = 0;
       processor.connect(gain);
       gain.connect(ctx.destination);
 
-      audioContextRef.current = ctx;
       processorRef.current = processor;
       setMicEnabled(true);
-      onMicReady(ctx);
+      setAudioContext(ctx);
     } catch (err) {
       setMicError((err as Error).message || "Failed to enable microphone");
       setMicEnabled(false);
@@ -134,7 +133,6 @@ export function VoiceInput({ onInterrupt, onMicReady, disabled }: VoiceInputProp
         />
       </label>
       {micError && <div style={{ color: "red" }}>{micError}</div>}
-      {/* Live region, no aria-live so screen reader users can opt-in */}
       <div aria-live="off" style={{ position: "absolute", left: "-9999px" }}>
         VAD {vadState} RMS {rms.toFixed(3)} threshold {vadThreshold.toFixed(3)}
       </div>

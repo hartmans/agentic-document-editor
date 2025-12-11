@@ -8,85 +8,101 @@ import {
   postInterruption,
 } from "../api";
 import { VoiceInput } from "./VoiceInput";
-import { DocumentPlayback } from "./DocumentPlayback";
+import {
+  DocumentPlayback,
+  DocumentPlaybackHandle,
+  ResumePoint,
+} from "./DocumentPlayback";
 
 export function DocumentEditor() {
   const [doc, setDoc] = useState<DocumentResponse | null>(null);
-  const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
-  const [playing, setPlaying] = useState(false);
-  const [resumePoint, setResumePoint] = useState<{ chunkId: number; offsetMs: number } | null>(
-    null
-  );
-  const [interruptionPosition, setInterruptionPosition] = useState<number | null>(null);
+  const [statusText, setStatusText] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [statusText, setStatusText] = useState<string>("");
-  const interruptHandlerRef = useRef<() => void>();
+  const [playing, setPlaying] = useState(false);
+  const [resumePoint, setResumePoint] = useState<ResumePoint | null>(null);
+  const [interruptionPosition, setInterruptionPosition] = useState<number | null>(null);
+  const playbackRef = useRef<DocumentPlaybackHandle>(null);
 
   useEffect(() => {
     (async () => {
       try {
         const [status, document] = await Promise.all([fetchStatus(), fetchDocument()]);
+        setDoc(document);
         setStatusText(
           `Voice ${status.voice_id}, chunks ${status.chunk_count}, strategy ${status.chunking_strategy}`
         );
-        setDoc(document);
       } catch (err) {
         setError((err as Error).message);
       }
     })();
   }, []);
 
-  function registerInterruptHandler(fn: () => void) {
-    interruptHandlerRef.current = fn;
-  }
+  const handlePlay = async () => {
+    try {
+      await playbackRef.current?.play(resumePoint ?? undefined);
+      setPlaying(true);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
 
-  function handleVoiceInterrupt() {
-    interruptHandlerRef.current?.();
-  }
+  const handleStop = () => {
+    const info = playbackRef.current?.stop();
+    if (info) {
+      setPlaying(false);
+      setResumePoint({
+        chunkId: info.chunkId ?? 0,
+        offsetMs: info.elapsedMs,
+        docCharPosition: info.docCharPosition ?? undefined,
+      });
+    }
+  };
 
-  async function handleInterruptRequest(payload: InterruptionRequest) {
+  const handleInterrupt = () => {
+    const info = playbackRef.current?.stop();
+    if (!info || info.chunkId == null) return;
+    sendInterruption({
+      chunk_id: info.chunkId,
+      elapsed_ms: info.elapsedMs,
+    });
+  };
+
+  async function sendInterruption(payload: InterruptionRequest) {
     try {
       const resp: InterruptionResponse = await postInterruption(payload);
-      setResumePoint({ chunkId: resp.chunk_id, offsetMs: resp.elapsed_ms });
-      setInterruptionPosition(resp.doc_char_position);
       setPlaying(false);
+      setResumePoint({
+        chunkId: resp.chunk_id,
+        offsetMs: resp.elapsed_ms,
+        docCharPosition: resp.doc_char_position,
+      });
+      setInterruptionPosition(resp.doc_char_position);
     } catch (err) {
       setError((err as Error).message);
     }
   }
 
-  function handleContinue() {
-    if (!resumePoint) return;
-    setPlaying(true);
-  }
-
-  if (!doc) {
-    return <div>Loading document...</div>;
-  }
+  if (!doc) return <div>Loading document...</div>;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
       <div>{statusText}</div>
-      <VoiceInput onInterrupt={handleVoiceInterrupt} onMicReady={setAudioContext} />
+      <VoiceInput onInterrupt={handleInterrupt} />
       <DocumentPlayback
+        ref={playbackRef}
         documentText={doc.document}
         chunks={doc.chunks}
-        audioContext={audioContext}
-        playing={playing}
         onPlayingChange={setPlaying}
-        onInterruptRequest={handleInterruptRequest}
-        onRegisterInterrupt={registerInterruptHandler}
-        resumePoint={resumePoint}
         interruptionPosition={interruptionPosition}
       />
       <div style={{ display: "flex", gap: "0.5rem" }}>
-        <button onClick={() => setPlaying(true)} disabled={playing}>
+        <button onClick={handlePlay} disabled={playing}>
           Play
         </button>
-        <button onClick={() => setPlaying(false)} disabled={!playing}>
+        <button onClick={handleStop} disabled={!playing}>
           Stop
         </button>
-        <button onClick={handleContinue} disabled={!resumePoint || playing}>
+        <button onClick={handlePlay} disabled={!resumePoint || playing}>
           Continue
         </button>
       </div>
