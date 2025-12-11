@@ -20,7 +20,6 @@ export function DocumentEditor() {
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [resumePoint, setResumePoint] = useState<ResumePoint | null>(null);
-  const [interruptionPosition, setInterruptionPosition] = useState<number | null>(null);
   const playbackRef = useRef<DocumentPlaybackHandle>(null);
 
   useEffect(() => {
@@ -76,7 +75,6 @@ export function DocumentEditor() {
         offsetMs: resp.elapsed_ms,
         docCharPosition: resp.doc_char_position,
       });
-      setInterruptionPosition(resp.doc_char_position);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -93,7 +91,6 @@ export function DocumentEditor() {
         documentText={doc.document}
         chunks={doc.chunks}
         onPlayingChange={setPlaying}
-        interruptionPosition={interruptionPosition}
       />
       <div style={{ display: "flex", gap: "0.5rem" }}>
         <button onClick={handlePlay} disabled={playing}>

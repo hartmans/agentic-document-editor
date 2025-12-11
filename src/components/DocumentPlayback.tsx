@@ -54,7 +54,6 @@ export function DocumentPlayback({
     const [currentChunkId, setCurrentChunkId] = useState<number | null>(null);
     const [highlightStart, setHighlightStart] = useState<number | null>(null);
     const playingRef = useRef(false);
-    const startTimeRef = useRef<number | null>(null);
 
     useEffect(() => {
       if (audioContext) {
@@ -90,7 +89,6 @@ export function DocumentPlayback({
         handleNaturalEnd(chunkId)
       );
       playingRef.current = true;
-      startTimeRef.current = audioContext.currentTime - offsetMs / 1000;
       setCurrentChunkId(chunkId);
       onPlayingChange?.(true);
     }
@@ -101,7 +99,6 @@ export function DocumentPlayback({
         startChunk(nextId, 0, chunks[nextId].doc_char_start);
       } else {
         playingRef.current = false;
-        startTimeRef.current = null;
         onPlayingChange?.(false);
       }
     }
@@ -116,7 +113,6 @@ export function DocumentPlayback({
       const chunkId = info?.playingChunkId ?? currentChunkId;
       const docCharPosition = null;
       playingRef.current = false;
-      startTimeRef.current = null;
       onPlayingChange?.(false);
       return { chunkId, elapsedMs, docCharPosition };
     }
