@@ -39,6 +39,13 @@ export interface InterruptionResponse {
   doc_char_position: number;
 }
 
+export interface SttToken {
+  access_key_id: string;
+  secret_access_key: string;
+  session_token: string;
+  expiration: string;
+}
+
 async function handleJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const text = await res.text();
@@ -73,4 +80,8 @@ export async function postInterruption(
     body: JSON.stringify(payload),
   });
   return handleJson(res);
+}
+
+export async function fetchSttToken(): Promise<SttToken> {
+  return handleJson(await fetch(join(API_BASE, "/stt_token")));
 }

@@ -11,6 +11,7 @@
     "lint": "eslint . --ext ts,tsx"
   },
   "dependencies": {
+    "@aws-sdk/client-transcribe-streaming": "^3.596.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },

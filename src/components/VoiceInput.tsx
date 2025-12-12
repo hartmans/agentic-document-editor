@@ -5,6 +5,7 @@ type VadState = "idle" | "listening" | "triggered";
 
 interface VoiceInputProps {
   onInterrupt: () => void;
+  onSpeechStart?: (payload: { preroll: Float32Array; mediaStream: MediaStream; sampleRate: number }) => void;
   disabled?: boolean;
 }
 
@@ -12,7 +13,7 @@ interface VoiceInputProps {
   * Handles mic permission, simple VAD, and a 250ms preroll ring buffer.
   * Decoupled from playback; emits onInterrupt when VAD fires or button pressed.
   */
-export function VoiceInput({ onInterrupt, disabled }: VoiceInputProps) {
+export function VoiceInput({ onInterrupt, onSpeechStart, disabled }: VoiceInputProps) {
   const { audioContext, setAudioContext } = useContext(AudioCtx);
   const [micEnabled, setMicEnabled] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
@@ -21,6 +22,7 @@ export function VoiceInput({ onInterrupt, disabled }: VoiceInputProps) {
   const [rms, setRms] = useState(0);
 
   const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const aboveCountRef = useRef(0);
   const triggeredRef = useRef(false);
 
@@ -52,6 +54,7 @@ export function VoiceInput({ onInterrupt, disabled }: VoiceInputProps) {
         audioContext ?? new AudioContext({ latencyHint: "interactive" });
       await ctx.resume();
       const source = ctx.createMediaStreamSource(stream);
+      streamRef.current = stream;
       // Resize preroll to ~250ms at current sample rate
       const prerollSamples = Math.max(1, Math.round(ctx.sampleRate * 0.25));
       prerollBufferRef.current = new Float32Array(prerollSamples);
@@ -90,6 +93,13 @@ export function VoiceInput({ onInterrupt, disabled }: VoiceInputProps) {
         if (!triggeredRef.current && aboveCountRef.current >= VAD_MIN_FRAMES) {
           triggeredRef.current = true;
           setVadState("triggered");
+          if (onSpeechStart) {
+            onSpeechStart({
+              preroll: prerollBufferRef.current.slice(),
+              mediaStream: stream,
+              sampleRate: ctx.sampleRate,
+            });
+          }
           onInterrupt();
         }
       };
