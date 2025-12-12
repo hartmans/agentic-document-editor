@@ -2,10 +2,9 @@ import { useState } from "react";
 
 interface InstructionsProps {
   onChange?: (text: string) => void;
-  partial?: string;
 }
 
-export function Instructions({ onChange, partial }: InstructionsProps) {
+export function Instructions({ onChange }: InstructionsProps) {
   const [text, setText] = useState("");
 
   function append(newText: string) {
@@ -29,12 +28,6 @@ export function Instructions({ onChange, partial }: InstructionsProps) {
         }}
       >
         {text || "No instructions yet."}
-        {partial ? (
-          <>
-            {text ? "\n" : ""}
-            <em>{partial}</em>
-          </>
-        ) : null}
       </div>
       <div style={{ fontSize: "0.9rem", marginTop: "0.35rem" }}>
         (Transcribed text will appear here.)

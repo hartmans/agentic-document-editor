@@ -23,7 +23,6 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
   const [vadThreshold, setVadThreshold] = useState(0.005);
   const [rms, setRms] = useState(0);
   const [instructions, setInstructions] = useState("");
-  const [partial, setPartial] = useState("");
   const [sttSession, setSttSession] = useState<{
     preroll: Float32Array;
     mediaStream: MediaStream;
@@ -166,10 +165,8 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
           onFinal={(t) =>
             setInstructions((prev) => (prev ? `${prev}\n${t}` : t))
           }
-          onPartial={(t) => setPartial(t)}
           onStop={() => {
             setSttSession(null);
-            setPartial("");
             onInstructions?.(instructions);
           }}
         />

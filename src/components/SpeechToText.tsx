@@ -12,7 +12,6 @@ interface SpeechToTextProps {
   getRms: () => number;
   vadThreshold: number;
   onFinal: (text: string) => void;
-  onPartial: (text: string) => void;
   onStop: () => void;
 }
 
@@ -71,10 +70,7 @@ export function SpeechToText({
                 : "";
             if (!text) continue;
             lastTranscriptRef.current = Date.now();
-            if (res.IsPartial) {
-              onPartial(text);
-            } else {
-              onPartial("");
+            if (!res.IsPartial) {
               onFinal(text);
             }
           }
