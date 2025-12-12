@@ -9,6 +9,8 @@ interface SpeechToTextProps {
   mediaStream: MediaStream;
   preroll: Float32Array;
   sampleRate: number;
+  getRms: () => number;
+  vadThreshold: number;
   onText: (text: string) => void;
   onStop: () => void;
 }
@@ -19,7 +21,15 @@ interface SpeechToTextProps {
  *  - 4s of no transcript and RMS below threshold, or
  *  - 10s of no transcript, whichever comes first.
  */
-export function SpeechToText({ mediaStream, preroll, sampleRate, onText, onStop }: SpeechToTextProps) {
+export function SpeechToText({
+  mediaStream,
+  preroll,
+  sampleRate,
+  getRms,
+  vadThreshold,
+  onText,
+  onStop,
+}: SpeechToTextProps) {
   const [running, setRunning] = useState(false);
   const stopTimerRef = useRef<NodeJS.Timeout | null>(null);
   const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -85,13 +95,19 @@ export function SpeechToText({ mediaStream, preroll, sampleRate, onText, onStop 
 
   function startStopTimers() {
     cleanupTimers();
-    stopTimerRef.current = setTimeout(() => endIfIdle(10000), 10000);
-    silenceTimerRef.current = setInterval(() => endIfIdle(4000), 1000);
+    stopTimerRef.current = setTimeout(() => endIfIdle(true), 10000);
+    silenceTimerRef.current = setInterval(() => endIfIdle(false), 500);
   }
 
-  function endIfIdle(thresholdMs: number) {
-    const idle = Date.now() - lastTranscriptRef.current;
-    if (idle >= thresholdMs) {
+  function endIfIdle(isHardLimit: boolean) {
+    const idleMs = Date.now() - lastTranscriptRef.current;
+    if (isHardLimit && idleMs >= 10000) {
+      cleanupTimers();
+      setRunning(false);
+      onStop();
+      return;
+    }
+    if (!isHardLimit && idleMs >= 4000 && getRms() < vadThreshold) {
       cleanupTimers();
       setRunning(false);
       onStop();

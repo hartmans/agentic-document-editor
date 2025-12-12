@@ -30,6 +30,7 @@ export function VoiceInput({ onInterrupt, disabled }: VoiceInputProps) {
 
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const rmsRef = useRef(0);
   const aboveCountRef = useRef(0);
   const triggeredRef = useRef(false);
 
@@ -85,6 +86,7 @@ export function VoiceInput({ onInterrupt, disabled }: VoiceInputProps) {
         for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
         const frameRms = Math.sqrt(sum / input.length);
         setRms(frameRms);
+        rmsRef.current = frameRms;
 
         if (!micEnabled) {
           aboveCountRef.current = 0;
@@ -101,7 +103,7 @@ export function VoiceInput({ onInterrupt, disabled }: VoiceInputProps) {
           triggeredRef.current = true;
           setVadState("triggered");
           setSttSession({
-            preroll: prerollBufferRef.current.slice(),
+            preroll: linearizeRing(prerollBufferRef.current, prerollWriteIdxRef.current),
             mediaStream: stream,
             sampleRate: ctx.sampleRate,
           });
@@ -157,6 +159,8 @@ export function VoiceInput({ onInterrupt, disabled }: VoiceInputProps) {
           mediaStream={sttSession.mediaStream}
           preroll={sttSession.preroll}
           sampleRate={sttSession.sampleRate}
+          getRms={() => rmsRef.current}
+          vadThreshold={vadThreshold}
           onText={(t) =>
             setInstructions((prev) => (prev ? `${prev}\n${t}` : t))
           }
@@ -165,4 +169,15 @@ export function VoiceInput({ onInterrupt, disabled }: VoiceInputProps) {
       )}
     </section>
   );
+}
+
+function linearizeRing(buffer: Float32Array, writeIdx: number): Float32Array {
+  // Oldest data is at writeIdx
+  const out = new Float32Array(buffer.length);
+  const firstLen = buffer.length - writeIdx;
+  out.set(buffer.subarray(writeIdx), 0);
+  if (writeIdx > 0) {
+    out.set(buffer.subarray(0, writeIdx), firstLen);
+  }
+  return out;
 }
