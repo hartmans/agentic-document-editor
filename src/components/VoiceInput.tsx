@@ -7,6 +7,7 @@ type VadState = "idle" | "listening" | "triggered";
 
 interface VoiceInputProps {
   onInterrupt: () => void;
+  onInstructions?: (text: string) => void;
   disabled?: boolean;
 }
 
@@ -14,7 +15,7 @@ interface VoiceInputProps {
   * Handles mic permission, simple VAD, and a 250ms preroll ring buffer.
   * Decoupled from playback; emits onInterrupt when VAD fires or button pressed.
   */
-export function VoiceInput({ onInterrupt, disabled }: VoiceInputProps) {
+export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInputProps) {
   const { audioContext, setAudioContext } = useContext(AudioCtx);
   const [micEnabled, setMicEnabled] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
@@ -22,6 +23,7 @@ export function VoiceInput({ onInterrupt, disabled }: VoiceInputProps) {
   const [vadThreshold, setVadThreshold] = useState(0.005);
   const [rms, setRms] = useState(0);
   const [instructions, setInstructions] = useState("");
+  const [partial, setPartial] = useState("");
   const [sttSession, setSttSession] = useState<{
     preroll: Float32Array;
     mediaStream: MediaStream;
@@ -161,10 +163,15 @@ export function VoiceInput({ onInterrupt, disabled }: VoiceInputProps) {
           sampleRate={sttSession.sampleRate}
           getRms={() => rmsRef.current}
           vadThreshold={vadThreshold}
-          onText={(t) =>
+          onFinal={(t) =>
             setInstructions((prev) => (prev ? `${prev}\n${t}` : t))
           }
-          onStop={() => setSttSession(null)}
+          onPartial={(t) => setPartial(t)}
+          onStop={() => {
+            setSttSession(null);
+            setPartial("");
+            onInstructions?.(instructions);
+          }}
         />
       )}
     </section>

@@ -11,7 +11,8 @@ interface SpeechToTextProps {
   sampleRate: number;
   getRms: () => number;
   vadThreshold: number;
-  onText: (text: string) => void;
+  onFinal: (text: string) => void;
+  onPartial: (text: string) => void;
   onStop: () => void;
 }
 
@@ -27,7 +28,8 @@ export function SpeechToText({
   sampleRate,
   getRms,
   vadThreshold,
-  onText,
+  onFinal,
+  onPartial,
   onStop,
 }: SpeechToTextProps) {
   const [running, setRunning] = useState(false);
@@ -67,9 +69,13 @@ export function SpeechToText({
               res.Alternatives && res.Alternatives[0]
                 ? res.Alternatives[0].Transcript
                 : "";
-            if (text) {
-              lastTranscriptRef.current = Date.now();
-              onText(text);
+            if (!text) continue;
+            lastTranscriptRef.current = Date.now();
+            if (res.IsPartial) {
+              onPartial(text);
+            } else {
+              onPartial("");
+              onFinal(text);
             }
           }
           if (cancelled || !running) break;
