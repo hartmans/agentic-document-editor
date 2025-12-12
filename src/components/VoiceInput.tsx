@@ -1,11 +1,12 @@
 import { useContext, useEffect, useRef, useState } from "react";
 import { AudioCtx } from "../context/AudioContextProvider";
+import { Instructions } from "./Instructions";
+import { SpeechToText } from "./SpeechToText";
 
 type VadState = "idle" | "listening" | "triggered";
 
 interface VoiceInputProps {
   onInterrupt: () => void;
-  onSpeechStart?: (payload: { preroll: Float32Array; mediaStream: MediaStream; sampleRate: number }) => void;
   disabled?: boolean;
 }
 
@@ -13,13 +14,19 @@ interface VoiceInputProps {
   * Handles mic permission, simple VAD, and a 250ms preroll ring buffer.
   * Decoupled from playback; emits onInterrupt when VAD fires or button pressed.
   */
-export function VoiceInput({ onInterrupt, onSpeechStart, disabled }: VoiceInputProps) {
+export function VoiceInput({ onInterrupt, disabled }: VoiceInputProps) {
   const { audioContext, setAudioContext } = useContext(AudioCtx);
   const [micEnabled, setMicEnabled] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
   const [vadState, setVadState] = useState<VadState>("idle");
   const [vadThreshold, setVadThreshold] = useState(0.005);
   const [rms, setRms] = useState(0);
+  const [instructions, setInstructions] = useState("");
+  const [sttSession, setSttSession] = useState<{
+    preroll: Float32Array;
+    mediaStream: MediaStream;
+    sampleRate: number;
+  } | null>(null);
 
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -93,13 +100,11 @@ export function VoiceInput({ onInterrupt, onSpeechStart, disabled }: VoiceInputP
         if (!triggeredRef.current && aboveCountRef.current >= VAD_MIN_FRAMES) {
           triggeredRef.current = true;
           setVadState("triggered");
-          if (onSpeechStart) {
-            onSpeechStart({
-              preroll: prerollBufferRef.current.slice(),
-              mediaStream: stream,
-              sampleRate: ctx.sampleRate,
-            });
-          }
+          setSttSession({
+            preroll: prerollBufferRef.current.slice(),
+            mediaStream: stream,
+            sampleRate: ctx.sampleRate,
+          });
           onInterrupt();
         }
       };
@@ -146,6 +151,18 @@ export function VoiceInput({ onInterrupt, onSpeechStart, disabled }: VoiceInputP
       <div aria-live="off" style={{ position: "absolute", left: "-9999px" }}>
         VAD {vadState} RMS {rms.toFixed(3)} threshold {vadThreshold.toFixed(3)}
       </div>
+      <Instructions onChange={setInstructions} />
+      {sttSession && (
+        <SpeechToText
+          mediaStream={sttSession.mediaStream}
+          preroll={sttSession.preroll}
+          sampleRate={sttSession.sampleRate}
+          onText={(t) =>
+            setInstructions((prev) => (prev ? `${prev}\n${t}` : t))
+          }
+          onStop={() => setSttSession(null)}
+        />
+      )}
     </section>
   );
 }

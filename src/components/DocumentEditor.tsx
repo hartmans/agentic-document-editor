@@ -13,8 +13,6 @@ import {
   DocumentPlaybackHandle,
   ResumePoint,
 } from "./DocumentPlayback";
-import { SpeechToText } from "./SpeechToText";
-import { Instructions } from "./Instructions";
 
 export function DocumentEditor() {
   const [doc, setDoc] = useState<DocumentResponse | null>(null);
@@ -22,12 +20,6 @@ export function DocumentEditor() {
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [resumePoint, setResumePoint] = useState<ResumePoint | null>(null);
-  const [sttSession, setSttSession] = useState<{
-    preroll: Float32Array;
-    mediaStream: MediaStream;
-    sampleRate: number;
-  } | null>(null);
-  const [instructions, setInstructions] = useState("");
   const playbackRef = useRef<DocumentPlaybackHandle>(null);
 
   useEffect(() => {
@@ -93,7 +85,7 @@ export function DocumentEditor() {
     mediaStream: MediaStream;
     sampleRate: number;
   }) {
-    setSttSession(payload);
+    // handled inside VoiceInput now; no-op
   }
 
   if (!doc) return <div>Loading document...</div>;
@@ -101,7 +93,7 @@ export function DocumentEditor() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
       <div>{statusText}</div>
-      <VoiceInput onInterrupt={handleInterrupt} onSpeechStart={handleSpeechStart} />
+      <VoiceInput onInterrupt={handleInterrupt} />
       <DocumentPlayback
         ref={playbackRef}
         documentText={doc.document}
@@ -119,16 +111,6 @@ export function DocumentEditor() {
           Continue
         </button>
       </div>
-      <Instructions onChange={setInstructions} />
-      {sttSession && (
-        <SpeechToText
-          mediaStream={sttSession.mediaStream}
-          preroll={sttSession.preroll}
-          sampleRate={sttSession.sampleRate}
-          onText={(t) => setInstructions((prev) => (prev ? `${prev}\n${t}` : t))}
-          onStop={() => setSttSession(null)}
-        />
-      )}
       {error && <div style={{ color: "red" }}>{error}</div>}
     </div>
   );
