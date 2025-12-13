@@ -1,4 +1,4 @@
-import { useContext, useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState, useEffectEvent } from "react";
 import { AudioCtx } from "../context/AudioContextProvider";
 import { Instructions } from "./Instructions";
 import { SpeechToText } from "../SpeechToText";
@@ -23,7 +23,6 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
   const [vadThreshold, setVadThreshold] = useState(0.005);
   const [rms, setRms] = useState(0);
   const [instructions, setInstructions] = useState("");
-  const instructionsRef = useRef("");
   const sttRef = useRef<SpeechToText | null>(null);
 
   const processorRef = useRef<ScriptProcessorNode | null>(null);
@@ -37,9 +36,19 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
 
   const VAD_MIN_FRAMES = 4; // frames above threshold required
 
-  useEffect(() => {
-    instructionsRef.current = instructions;
-  }, [instructions]);
+  const appendInstruction = (text: string) => {
+    setInstructions((prev) => (prev ? `${prev}\n${text}` : text));
+  };
+
+  const emitInstructions = useEffectEvent((full: string) => {
+    onInstructions?.(full);
+  });
+
+  const handleStop = useEffectEvent(() => {
+    sttRef.current = null;
+    emitInstructions(instructions);
+    console.log('instructions:', instructions);
+  });
 
   useEffect(() => {
     return () => {
@@ -96,21 +105,18 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
         if (isAbove) aboveCountRef.current += 1;
         else aboveCountRef.current = Math.max(0, aboveCountRef.current - 1);
 
-        if (!triggeredRef.current && aboveCountRef.current >= VAD_MIN_FRAMES) {
-          triggeredRef.current = true;
-          setVadState("triggered");
-          if (!sttRef.current) {
+          if (!triggeredRef.current && aboveCountRef.current >= VAD_MIN_FRAMES) {
+            triggeredRef.current = true;
+            setVadState("triggered");
+            if (!sttRef.current) {
             sttRef.current = new SpeechToText({
               mediaStream: stream,
               preroll: linearizeRing(prerollBufferRef.current, prerollWriteIdxRef.current),
               sampleRate: ctx.sampleRate,
               getRms: () => rmsRef.current,
               vadThreshold,
-              onFinal: (t) => setInstructions((prev) => (prev ? `${prev}\n${t}` : t)),
-              onStop: () => {
-                sttRef.current = null;
-                onInstructions?.(instructionsRef.current);
-              },
+              onFinal: (t) => appendInstruction(t),
+              onStop: () => handleStop(),
             });
             onInterrupt();
           }
@@ -160,12 +166,12 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
       <div aria-live="off" style={{ position: "absolute", left: "-9999px" }}>
         VAD {vadState} RMS {rms.toFixed(3)} threshold {vadThreshold.toFixed(3)}
       </div>
-      <Instructions onChange={setInstructions} />
+      <Instructions onChange={setInstructions} instructions={instructions} />
     </section>
   );
 }
 
-function linearizeRing(buffer: Float32Array, writeIdx: number): Float32Array {
+  function linearizeRing(buffer: Float32Array, writeIdx: number): Float32Array {
   // Oldest data is at writeIdx
   const out = new Float32Array(buffer.length);
   const firstLen = buffer.length - writeIdx;

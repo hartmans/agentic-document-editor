@@ -2,16 +2,10 @@ import { useState } from "react";
 
 interface InstructionsProps {
   onChange?: (text: string) => void;
+  instructions: string;
 }
 
-export function Instructions({ onChange }: InstructionsProps) {
-  const [text, setText] = useState("");
-
-  function append(newText: string) {
-    const updated = text ? `${text}\n${newText}` : newText;
-    setText(updated);
-    onChange?.(updated);
-  }
+export function Instructions({ onChange, instructions }: InstructionsProps) {
 
   return (
     <section style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
@@ -27,10 +21,10 @@ export function Instructions({ onChange }: InstructionsProps) {
           whiteSpace: "pre-wrap",
         }}
       >
-        {text || "No instructions yet."}
+        {instructions || "No instructions yet."}
       </div>
       <div style={{ fontSize: "0.9rem", marginTop: "0.35rem" }}>
-        (Transcribed text will appear here.)
+        (Transcribed instructions will appear here.)
       </div>
     </section>
   );
