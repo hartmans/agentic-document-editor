@@ -89,12 +89,6 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
         setRms(frameRms);
         rmsRef.current = frameRms;
 
-        if (!micEnabled) {
-          aboveCountRef.current = 0;
-          triggeredRef.current = false;
-          setVadState("idle");
-          return;
-        }
         setVadState("listening");
         const isAbove = frameRms >= vadThreshold;
         if (isAbove) aboveCountRef.current += 1;
