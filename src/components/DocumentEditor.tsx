@@ -20,7 +20,7 @@ export function DocumentEditor() {
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [resumePoint, setResumePoint] = useState<ResumePoint | null>(null);
-  const playbackRef = useRef<DocumentPlaybackHandle>(null);
+  const playbackRef = useRef<DocumentPlaybackHandle | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -38,7 +38,11 @@ export function DocumentEditor() {
 
   const handlePlay = async () => {
     try {
-      await playbackRef.current?.play(resumePoint ?? undefined);
+      if (!playbackRef.current) {
+        setError("Playback not ready. Enable microphone and wait a moment.");
+        return;
+      }
+      await playbackRef.current.play(resumePoint ?? undefined);
       setPlaying(true);
     } catch (err) {
       setError((err as Error).message);
