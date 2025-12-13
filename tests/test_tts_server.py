@@ -16,12 +16,14 @@ def sample_document(tmp_path_factory):
 def document_state(sample_document, tmp_path_factory):
     _path, doc_text = sample_document
     cache_dir = tmp_path_factory.mktemp("cache")
+    session = tts_server.boto3.Session()
     return tts_server.build_document_state(
         document_text=doc_text,
         voice_id="Joanna",
         chunking_strategy="paragraph",
         region_name="us-east-1",
         cache_dir=cache_dir,
+        session=session,
     )
 
 
@@ -56,3 +58,33 @@ def test_api_endpoints(document_state):
     interrupt = interrupt_resp.json()
     assert interrupt["chunk_id"] == 0
     assert interrupt["doc_char_position"] >= 0
+
+
+def test_stt_token_endpoint(document_state, monkeypatch):
+    fake_creds = {
+        "AccessKeyId": "AKIAFAKE",
+        "SecretAccessKey": "SECRET",
+        "SessionToken": "TOKEN",
+        "Expiration": "2024-01-01T00:00:00Z",
+    }
+
+    class FakeStsClient:
+        def get_federation_token(self, **kwargs):
+            return {"Credentials": fake_creds}
+
+    class FakeSession:
+        def client(self, name, region_name=None):
+            assert name == "sts"
+            return FakeStsClient()
+
+    document_state.aws_session = FakeSession()
+    document_state.region_name = "us-east-1"
+    app = tts_server.create_app(document_state)
+    client = TestClient(app)
+
+    resp = client.get("/stt_token")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["access_key_id"] == fake_creds["AccessKeyId"]
+    assert data["secret_access_key"] == fake_creds["SecretAccessKey"]
+    assert data["session_token"] == fake_creds["SessionToken"]

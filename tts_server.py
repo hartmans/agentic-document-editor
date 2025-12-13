@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Sequence
@@ -57,6 +58,8 @@ class DocumentState:
     voice_id: str
     chunking_strategy: str
     chunks: List[TextChunk] = field(default_factory=list)
+    aws_session: boto3.Session | None = None
+    region_name: str | None = None
 
 
 # ----------------------------- Chunking ------------------------------------ #
@@ -173,6 +176,13 @@ class InterruptionResponse(BaseModel):
     doc_char_position: int
 
 
+class StsTokenResponse(BaseModel):
+    access_key_id: str
+    secret_access_key: str
+    session_token: str
+    expiration: str
+
+
 # ----------------------------- FastAPI app --------------------------------- #
 
 
@@ -229,6 +239,44 @@ def create_app(state: DocumentState) -> FastAPI:
         mapping = map_elapsed_time_to_document(chunk, request.elapsed_ms)
         return InterruptionResponse(**mapping)
 
+    @app.get("/stt_token", response_model=StsTokenResponse)
+    def get_stt_token():
+        if state.aws_session is None or state.region_name is None:
+            raise HTTPException(status_code=500, detail="AWS session not configured")
+        client = state.aws_session.client("sts", region_name=state.region_name)
+        policy = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Action": [
+                        "transcribe:StartStreamTranscription",
+                        "transcribe:StartTranscriptionJob",
+                        "transcribe:GetTranscriptionJob",
+                    ],
+                    "Resource": "*",
+                }
+            ],
+        }
+        try:
+            resp = client.get_federation_token(
+                Name="agentic-editor-stt",
+                Policy=json.dumps(policy),
+                DurationSeconds=300,
+            )
+        except ClientError as exc:
+            logging.error("Failed to obtain STS token: %s", exc)
+            raise HTTPException(status_code=500, detail="Failed to obtain STS token")
+        creds = resp.get("Credentials")
+        if not creds:
+            raise HTTPException(status_code=500, detail="Invalid STS response")
+        return StsTokenResponse(
+            access_key_id=creds["AccessKeyId"],
+            secret_access_key=creds["SecretAccessKey"],
+            session_token=creds["SessionToken"],
+            expiration=creds["Expiration"].isoformat() if hasattr(creds["Expiration"], "isoformat") else str(creds["Expiration"]),
+        )
+
     return app
 
 
@@ -247,12 +295,13 @@ def build_document_state(
     chunking_strategy: str,
     region_name: str,
     cache_dir: Path,
+    session: boto3.Session | None = None,
 ) -> DocumentState:
     if chunking_strategy != "paragraph":
         raise ValueError(f"Unsupported chunking strategy: {chunking_strategy}")
 
     chunk_spans = chunk_document_paragraphs(document_text)
-    session = boto3.Session()
+    session = session or boto3.Session()
     tts_cache = TtsCache(
         cache_dir=cache_dir,
         boto_session=session,
@@ -287,6 +336,8 @@ def build_document_state(
         voice_id=voice_id,
         chunking_strategy=chunking_strategy,
         chunks=chunks,
+        aws_session=session,
+        region_name=region_name,
     )
 
 
