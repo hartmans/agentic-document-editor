@@ -89,7 +89,6 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
         setRms(frameRms);
         rmsRef.current = frameRms;
 
-        setVadState("listening");
         const isAbove = frameRms >= vadThreshold;
         if (isAbove) aboveCountRef.current += 1;
         else aboveCountRef.current = Math.max(0, aboveCountRef.current - 1);
@@ -97,11 +96,15 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
         if (!triggeredRef.current && aboveCountRef.current >= VAD_MIN_FRAMES) {
           triggeredRef.current = true;
           setVadState("triggered");
-          setSttSession({
-            preroll: linearizeRing(prerollBufferRef.current, prerollWriteIdxRef.current),
-            mediaStream: stream,
-            sampleRate: ctx.sampleRate,
-          });
+          setSttSession((prev) =>
+            prev
+              ? prev
+              : {
+                  preroll: linearizeRing(prerollBufferRef.current, prerollWriteIdxRef.current),
+                  mediaStream: stream,
+                  sampleRate: ctx.sampleRate,
+                }
+          );
           onInterrupt();
         }
       };
@@ -113,6 +116,7 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
 
       processorRef.current = processor;
       setMicEnabled(true);
+      setVadState("listening");
       setAudioContext(ctx);
     } catch (err) {
       setMicError((err as Error).message || "Failed to enable microphone");

@@ -251,6 +251,7 @@ def create_app(state: DocumentState) -> FastAPI:
                     "Effect": "Allow",
                     "Action": [
                         "transcribe:StartStreamTranscription",
+                        "transcribe:StartStreamTranscriptionWebSocket",
                         "transcribe:StartTranscriptionJob",
                         "transcribe:GetTranscriptionJob",
                     ],
@@ -262,7 +263,7 @@ def create_app(state: DocumentState) -> FastAPI:
             resp = client.get_federation_token(
                 Name="agentic-editor-stt",
                 Policy=json.dumps(policy),
-                DurationSeconds=300,
+                DurationSeconds=900,
             )
         except ClientError as exc:
             logging.error("Failed to obtain STS token: %s", exc)
@@ -276,7 +277,6 @@ def create_app(state: DocumentState) -> FastAPI:
             session_token=creds["SessionToken"],
             expiration=creds["Expiration"].isoformat() if hasattr(creds["Expiration"], "isoformat") else str(creds["Expiration"]),
         )
-
     return app
 
 
