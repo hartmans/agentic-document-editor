@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useEffectEvent} from "react";
 import {
   TranscribeStreamingClient,
   StartStreamTranscriptionCommand,
@@ -30,10 +30,13 @@ export function SpeechToText({
   onFinal,
   onStop,
 }: SpeechToTextProps) {
-  const [running, setRunning] = useState(false);
+  const [running, setRunning] = useState(true);
   const stopTimerRef = useRef<NodeJS.Timeout | null>(null);
   const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const lastTranscriptRef = useRef<number|null>((null));
+  const lastTranscriptRef = useRef<number | null>(null);
+  const startedRef = useRef<number>(Date.now());
+  const seenTranscriptEventRef = useRef(false);
+  const isRunning = useEffectEvent(() => running);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,6 +55,10 @@ export function SpeechToText({
 
         const audioIterator = pcmAudioIterator(mediaStream, preroll, sampleRate);
         setRunning(true);
+        if (!isRunning()) {
+        console.error('not running');
+        return;
+        }
         const command = new StartStreamTranscriptionCommand({
           LanguageCode: "en-US",
           MediaEncoding: "pcm",
@@ -60,27 +67,61 @@ export function SpeechToText({
         });
 
         const response = await client.send(command);
-        console.log('STT Started');
-        for await (const evt of response.TranscriptResultStream ?? []) {
-          const results = evt?.TranscriptEvent?.Transcript?.Results;
-          if (!results) continue;
-          for (const res of results) {
-            console.log('Got STT result');
-            const text =
-              res.Alternatives && res.Alternatives[0]
-                ? res.Alternatives[0].Transcript
-                : "";
-            if (!text) continue;
-            lastTranscriptRef.current = Date.now();
-            if (!res.IsPartial) {
-              onFinal(text);
+        console.log("STT Started", { t: Date.now() });
+        try {
+          for await (const evt of response.TranscriptResultStream ?? []) {
+            seenTranscriptEventRef.current = true;
+            const results = evt?.TranscriptEvent?.Transcript?.Results;
+            console.log("TranscriptEvent", {
+              t: Date.now(),
+              resultsLen: results?.length ?? 0,
+            });
+            if (!results) continue;
+            for (const res of results) {
+              console.log("Got STT result", {
+                isPartial: res.IsPartial,
+                len: res.Alternatives?.[0]?.Transcript?.length ?? 0,
+              });
+              const text =
+                res.Alternatives && res.Alternatives[0]
+                  ? res.Alternatives[0].Transcript
+                  : "";
+              if (!text) continue;
+              lastTranscriptRef.current = Date.now();
+              if (!res.IsPartial) {
+                onFinal(text);
+              }
+            }
+            if (cancelled) {
+              console.debug('STT cancelled');
+              return;
+            }
+            if ( !isRunning()) {
+            console.log('running false');
+            break;
             }
           }
-          if (cancelled || !running) break;
+        } catch (streamErr) {
+          console.error("STT stream error", streamErr);
+        } finally {
+        audioIterator.return();
         }
+        const meta = response?.$metadata || {};
+        console.log("STT stream ended", {
+          t: Date.now(),
+          httpStatus: meta.httpStatusCode,
+          requestId: meta.requestId,
+          attempts: meta.attempts,
+          totalRetryDelay: meta.totalRetryDelay,
+          rawMetadata: meta,
+        });
       } catch (err) {
         console.error("STT failed", err);
       } finally {
+        console.debug("STT finished", {
+          t: Date.now(),
+          seenTranscript: seenTranscriptEventRef.current,
+        });
         cleanupTimers();
         setRunning(false);
         onStop();
@@ -90,10 +131,9 @@ export function SpeechToText({
     startStopTimers();
 
     return () => {
+        console.debug('stt unmounted');
       cancelled = true;
       cleanupTimers();
-      setRunning(false);
-      onStop();
     };
   }, []);
 
@@ -104,16 +144,17 @@ export function SpeechToText({
   }
 
   function endIfIdle(isHardLimit: boolean) {
-    const idleMs = Date.now() - (lastTranscriptRef.current||started);
-    if (isHardLimit && idleMs >= 10000) {
+    const idleMs = Date.now() - (lastTranscriptRef.current || startedRef.current);
+      if (isHardLimit && idleMs >= 10000) {
+          console.debug('hard limit');
       cleanupTimers();
       setRunning(false);
       onStop();
       return;
     }
-    if (!lastTranscriptRef.current)
-      return;
+    if (!lastTranscriptRef.current) return;
     if (!isHardLimit && idleMs >= 4000 && getRms() < vadThreshold) {
+      console.debug('soft limit');
       cleanupTimers();
       setRunning(false);
       onStop();
@@ -136,15 +177,17 @@ async function* pcmAudioIterator(
   sampleRate: number
 ) {
   const audioCtx = new AudioContext({ sampleRate });
+  await audioCtx.resume().catch(() => {});
   const source = audioCtx.createMediaStreamSource(mediaStream);
   const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+  let done = false;
 
   // First yield preroll
   if (preroll.length) {
     const prerollResampled = downsampleTo16k(preroll, sampleRate);
     const prerollPcm = floatTo16BitPCM(prerollResampled);
     yield { AudioEvent: { AudioChunk: prerollPcm } };
-    console.debug('Yielded preroll pcm');
+    console.debug("Yielded preroll pcm");
   }
 
   source.connect(processor);
@@ -152,18 +195,27 @@ async function* pcmAudioIterator(
 
   const queue: Uint8Array[] = [];
   processor.onaudioprocess = (e) => {
+    if (done) return;
     const data = e.inputBuffer.getChannelData(0);
     const resampled = downsampleTo16k(data, sampleRate);
     queue.push(floatTo16BitPCM(resampled));
   };
 
-  while (true) {
-    if (queue.length) {
-      yield { AudioEvent: { AudioChunk: queue.shift()! } };
-      console.debug('yielded audio')
-    } else {
-      await new Promise((resolve) => setTimeout(resolve, 10));
+  try {
+    while (true) {
+      if (done) break;
+      if (queue.length) {
+        yield { AudioEvent: { AudioChunk: queue.shift()! } };
+        console.debug("yielded audio");
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
     }
+  } finally {
+    done = true;
+    processor.disconnect();
+    source.disconnect();
+    audioCtx.close().catch(() => {});
   }
 }
 
