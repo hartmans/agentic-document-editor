@@ -1,7 +1,7 @@
 import { useContext, useEffect, useRef, useState } from "react";
 import { AudioCtx } from "../context/AudioContextProvider";
 import { Instructions } from "./Instructions";
-import { SpeechToText } from "./SpeechToText";
+import { SpeechToText } from "../SpeechToText";
 
 type VadState = "idle" | "listening" | "triggered";
 
@@ -23,14 +23,10 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
   const [vadThreshold, setVadThreshold] = useState(0.005);
   const [rms, setRms] = useState(0);
   const [instructions, setInstructions] = useState("");
-  const [sttSession, setSttSession] = useState<{
-    preroll: Float32Array;
-    mediaStream: MediaStream;
-    sampleRate: number;
-  } | null>(null);
+  const instructionsRef = useRef("");
+  const sttRef = useRef<SpeechToText | null>(null);
 
   const processorRef = useRef<ScriptProcessorNode | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
   const rmsRef = useRef(0);
   const aboveCountRef = useRef(0);
   const triggeredRef = useRef(false);
@@ -42,9 +38,17 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
   const VAD_MIN_FRAMES = 4; // frames above threshold required
 
   useEffect(() => {
+    instructionsRef.current = instructions;
+  }, [instructions]);
+
+  useEffect(() => {
     return () => {
       processorRef.current?.disconnect();
       audioContext?.close();
+      if (sttRef.current) {
+        sttRef.current.close();
+        sttRef.current = null;
+      }
     };
   }, [audioContext]);
 
@@ -63,7 +67,6 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
         audioContext ?? new AudioContext({ latencyHint: "interactive" });
       await ctx.resume();
       const source = ctx.createMediaStreamSource(stream);
-      streamRef.current = stream;
       // Resize preroll to ~250ms at current sample rate
       const prerollSamples = Math.max(1, Math.round(ctx.sampleRate * 0.25));
       prerollBufferRef.current = new Float32Array(prerollSamples);
@@ -96,16 +99,21 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
         if (!triggeredRef.current && aboveCountRef.current >= VAD_MIN_FRAMES) {
           triggeredRef.current = true;
           setVadState("triggered");
-          setSttSession((prev) =>
-            prev
-              ? prev
-              : {
-                  preroll: linearizeRing(prerollBufferRef.current, prerollWriteIdxRef.current),
-                  mediaStream: stream,
-                  sampleRate: ctx.sampleRate,
-                }
-          );
-          onInterrupt();
+          if (!sttRef.current) {
+            sttRef.current = new SpeechToText({
+              mediaStream: stream,
+              preroll: linearizeRing(prerollBufferRef.current, prerollWriteIdxRef.current),
+              sampleRate: ctx.sampleRate,
+              getRms: () => rmsRef.current,
+              vadThreshold,
+              onFinal: (t) => setInstructions((prev) => (prev ? `${prev}\n${t}` : t)),
+              onStop: () => {
+                sttRef.current = null;
+                onInstructions?.(instructionsRef.current);
+              },
+            });
+            onInterrupt();
+          }
         }
       };
       source.connect(processor);
@@ -153,22 +161,6 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
         VAD {vadState} RMS {rms.toFixed(3)} threshold {vadThreshold.toFixed(3)}
       </div>
       <Instructions onChange={setInstructions} />
-      {sttSession && (
-        <SpeechToText
-          mediaStream={sttSession.mediaStream}
-          preroll={sttSession.preroll}
-          sampleRate={sttSession.sampleRate}
-          getRms={() => rmsRef.current}
-          vadThreshold={vadThreshold}
-          onFinal={(t) =>
-            setInstructions((prev) => (prev ? `${prev}\n${t}` : t))
-          }
-          onStop={() => {
-            setSttSession(null);
-            onInstructions?.(instructions);
-          }}
-        />
-      )}
     </section>
   );
 }
