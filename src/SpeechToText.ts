@@ -21,12 +21,12 @@ export interface SpeechToTextProps {
  */
 export class SpeechToText {
   private props: SpeechToTextProps;
-  private stopTimer: ReturnType<typeof setTimeout> | null = null;
   private silenceTimer: ReturnType<typeof setInterval> | null = null;
   private stopped = false;
   private closedByParent = false;
   private abortController = new AbortController();
   private lastTranscript: number | null = null;
+  private readonly sessionStart = Date.now();
   private queue: { data: Float32Array; isPreroll: boolean }[] = [];
   private queueBytes = 0; // in samples *4 (Float32)
   private pendingResolve: (() => void) | null = null;
@@ -128,27 +128,28 @@ export class SpeechToText {
 
   private startIdleTimers() {
     this.cleanupTimers();
-    // Hard cap 10s; soft cap 4s after first transcript if RMS low.
-    this.stopTimer = setTimeout(() => this.handleIdle(true), 10000);
-    this.silenceTimer = setInterval(() => this.handleIdle(false), 500);
+    // Evaluate both hard (10s since last transcript) and soft (4s since last transcript & below VAD)
+    this.silenceTimer = setInterval(() => this.handleIdle(), 500);
   }
 
-  private handleIdle(hard: boolean) {
+  private handleIdle() {
     if (this.closedByParent || this.stopped) return;
-    const idleMs = Date.now() - (this.lastTranscript ?? Date.now());
-    if (hard && idleMs >= 10000) {
+    const now = Date.now();
+    const last = this.lastTranscript ?? this.sessionStart;
+    const idleMs = now - last;
+    // Hard cap: 10s without any new transcript results.
+    if (idleMs >= 10000) {
       this.abortController.abort();
       return;
     }
-    if (!hard && this.lastTranscript && idleMs >= 4000 && this.props.getRms() < this.props.vadThreshold) {
+    // Soft cap: after at least one transcript, 4s idle AND below VAD threshold.
+    if (this.lastTranscript && idleMs >= 4000 && this.props.getRms() < this.props.vadThreshold) {
       this.abortController.abort();
     }
   }
 
   private cleanupTimers() {
-    if (this.stopTimer) clearTimeout(this.stopTimer);
     if (this.silenceTimer) clearInterval(this.silenceTimer);
-    this.stopTimer = null;
     this.silenceTimer = null;
   }
 
