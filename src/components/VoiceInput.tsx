@@ -85,16 +85,7 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
         processorRef.current || ctx.createScriptProcessor(1024, 1, 1);
       processor.onaudioprocess = (event) => {
         const input = event.inputBuffer.getChannelData(0);
-        // preroll ring
-        const buffer = prerollBufferRef.current;
-        let w = prerollWriteIdxRef.current;
-        for (let i = 0; i < input.length; i++) {
-          buffer[w] = input[i];
-          w = (w + 1) % buffer.length;
-        }
-        prerollWriteIdxRef.current = w;
-
-        // rms
+        // rms / VAD
         let sum = 0;
         for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
         const frameRms = Math.sqrt(sum / input.length);
@@ -105,22 +96,42 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
         if (isAbove) aboveCountRef.current += 1;
         else aboveCountRef.current = Math.max(0, aboveCountRef.current - 1);
 
-          if (!triggeredRef.current && aboveCountRef.current >= VAD_MIN_FRAMES) {
-            triggeredRef.current = true;
-            setVadState("triggered");
-            if (!sttRef.current) {
-            sttRef.current = new SpeechToText({
-              mediaStream: stream,
-              preroll: linearizeRing(prerollBufferRef.current, prerollWriteIdxRef.current),
+        let stt = sttRef.current;
+        const justTriggered = !triggeredRef.current && aboveCountRef.current >= VAD_MIN_FRAMES;
+
+        if (justTriggered) {
+          triggeredRef.current = true;
+          setVadState("triggered");
+          if (!stt) {
+            const prerollCopy = linearizeRing(
+              prerollBufferRef.current,
+              prerollWriteIdxRef.current
+            );
+            stt = sttRef.current = new SpeechToText({
               sampleRate: ctx.sampleRate,
               getRms: () => rmsRef.current,
               vadThreshold,
               onFinal: (t) => appendInstruction(t),
               onStop: () => handleStop(),
             });
+            stt.queue_chunk(prerollCopy, true);
             onInterrupt();
           }
         }
+
+        // Send current frame if STT is active (including the frame that triggered it)
+        if (stt) {
+          stt.queue_chunk(input, false);
+        }
+
+        // update preroll ring AFTER using it to avoid including current frame twice
+        const buffer = prerollBufferRef.current;
+        let w = prerollWriteIdxRef.current;
+        for (let i = 0; i < input.length; i++) {
+          buffer[w] = input[i];
+          w = (w + 1) % buffer.length;
+        }
+        prerollWriteIdxRef.current = w;
       };
       source.connect(processor);
       const gain = ctx.createGain();

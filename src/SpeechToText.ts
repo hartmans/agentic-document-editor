@@ -5,8 +5,6 @@ import {
 import { fetchSttToken } from "./api";
 
 export interface SpeechToTextProps {
-  mediaStream: MediaStream;
-  preroll: Float32Array;
   sampleRate: number;
   getRms: () => number;
   vadThreshold: number;
@@ -16,9 +14,10 @@ export interface SpeechToTextProps {
 
 /**
  * SpeechToText manages a single Transcribe Streaming session.
- * It owns its AudioContext/processor and ensures onStop is fired at most once
- * when the session ends naturally or due to error. Parent-initiated close()
- * will not call onStop.
+ * It consumes Float32 frames provided by the parent via queue_chunk and
+ * streams them to AWS Transcribe. onStop is fired at most once when the
+ * session ends naturally or due to error. Parent-initiated close() will not
+ * call onStop.
  */
 export class SpeechToText {
   private props: SpeechToTextProps;
@@ -28,10 +27,35 @@ export class SpeechToText {
   private closedByParent = false;
   private abortController = new AbortController();
   private lastTranscript: number | null = null;
+  private queue: { data: Float32Array; isPreroll: boolean }[] = [];
+  private queueBytes = 0; // in samples *4 (Float32)
+  private pendingResolve: (() => void) | null = null;
+  private readonly maxQueuedSamples: number;
+
+  private readonly resampler: StatefulResampler;
+  private readonly INPUT_GAIN = 2.0;
 
   constructor(props: SpeechToTextProps) {
     this.props = props;
+    this.resampler = new StatefulResampler(props.sampleRate, 16000);
+    this.maxQueuedSamples = Math.floor(props.sampleRate * 5); // 5s safety cap
     void this.start();
+  }
+
+  /** Enqueue captured audio (Float32, source sampleRate). */
+  queue_chunk(chunk: Float32Array, isPreroll = false) {
+    if (this.stopped || this.closedByParent) return;
+    this.queue.push({ data: chunk, isPreroll });
+    this.queueBytes += chunk.length;
+    if (this.queueBytes > this.maxQueuedSamples) {
+      console.error("STT queue overflow (>5s); aborting session");
+      this.abortController.abort();
+      return;
+    }
+    if (this.pendingResolve) {
+      this.pendingResolve();
+      this.pendingResolve = null;
+    }
   }
 
   /** Called by parent to terminate without firing onStop. */
@@ -39,6 +63,7 @@ export class SpeechToText {
     this.closedByParent = true;
     this.abortController.abort();
     this.cleanupTimers();
+    this.wakeIterator();
   }
 
   private async start() {
@@ -53,12 +78,7 @@ export class SpeechToText {
         },
       });
 
-      const audioIterator = this.pcmAudioIterator(
-        this.props.mediaStream,
-        this.props.preroll,
-        this.props.sampleRate,
-        this.abortController.signal
-      );
+      const audioIterator = this.pcmAudioIterator(this.abortController.signal);
 
       this.startIdleTimers();
 
@@ -132,57 +152,44 @@ export class SpeechToText {
     this.silenceTimer = null;
   }
 
-  private async *pcmAudioIterator(
-    mediaStream: MediaStream,
-    preroll: Float32Array,
-    sampleRate: number,
-    signal: AbortSignal
-  ) {
-    const audioCtx = new AudioContext({ sampleRate });
-    await audioCtx.resume().catch(() => {});
-    const source = audioCtx.createMediaStreamSource(mediaStream);
-    const processor = audioCtx.createScriptProcessor(4096, 1, 1);
-    let done = false;
-
-    if (signal.aborted) {
-      audioCtx.close().catch(() => {});
-      return;
-    }
-
+  private async *pcmAudioIterator(signal: AbortSignal) {
     signal.addEventListener("abort", () => {
-      done = true;
+      this.stopped = true;
+      this.wakeIterator();
     });
 
-    if (preroll.length) {
-      const prerollResampled = downsampleTo16k(preroll, sampleRate);
-      const prerollPcm = floatTo16BitPCM(prerollResampled);
-      yield { AudioEvent: { AudioChunk: prerollPcm } };
-    }
-
-    source.connect(processor);
-    processor.connect(audioCtx.destination);
-
-    const queue: Uint8Array[] = [];
-    processor.onaudioprocess = (e) => {
-      if (done) return;
-      const data = e.inputBuffer.getChannelData(0);
-      const resampled = downsampleTo16k(data, sampleRate);
-      queue.push(floatTo16BitPCM(resampled));
-    };
-
     try {
-      while (!done) {
-        if (queue.length) {
-          yield { AudioEvent: { AudioChunk: queue.shift()! } };
-        } else {
-          await new Promise((resolve) => setTimeout(resolve, 10));
-        }
+      while (!this.stopped && !this.closedByParent && !signal.aborted) {
+        const next = await this.dequeue();
+        if (!next) continue;
+        const boosted = applyGain(next.data, this.INPUT_GAIN);
+        const resampled = this.resampler.process(boosted);
+        const pcm = floatTo16BitPCM(resampled);
+        yield { AudioEvent: { AudioChunk: pcm } };
       }
     } finally {
-      processor.disconnect();
-      source.disconnect();
-      audioCtx.close().catch(() => {});
     }
+  }
+
+  private wakeIterator() {
+    if (this.pendingResolve) {
+      this.pendingResolve();
+      this.pendingResolve = null;
+    }
+  }
+
+  private dequeue(): Promise<{ data: Float32Array; isPreroll: boolean } | null> {
+    if (this.queue.length) {
+      const item = this.queue.shift()!;
+      this.queueBytes -= item.data.length;
+      return Promise.resolve(item);
+    }
+    if (this.stopped || this.closedByParent || this.abortController.signal.aborted) {
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve) => {
+      this.pendingResolve = () => resolve(this.dequeue());
+    });
   }
 }
 
@@ -197,25 +204,51 @@ function floatTo16BitPCM(input: Float32Array): Uint8Array {
   return new Uint8Array(buffer);
 }
 
-function downsampleTo16k(input: Float32Array, sourceRate: number): Float32Array {
-  const targetRate = 16000;
-  if (sourceRate === targetRate) return input;
-  const ratio = sourceRate / targetRate;
-  const newLen = Math.floor(input.length / ratio);
-  const output = new Float32Array(newLen);
-  let offsetResult = 0;
-  let offsetBuffer = 0;
-  while (offsetResult < output.length) {
-    const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
-    let accum = 0;
-    let count = 0;
-    for (let i = offsetBuffer; i < nextOffsetBuffer && i < input.length; i++) {
-      accum += input[i];
-      count++;
-    }
-    output[offsetResult] = count ? accum / count : 0;
-    offsetResult++;
-    offsetBuffer = nextOffsetBuffer;
+/**
+ * Stateful linear resampler that preserves fractional phase across calls,
+ * eliminating dropped/duplicated samples at buffer boundaries.
+ */
+class StatefulResampler {
+  private readonly ratio: number;
+  private phase = 0; // fractional source index carried across buffers
+  private lastSample = 0;
+
+  constructor(private readonly sourceRate: number, private readonly targetRate: number) {
+    this.ratio = sourceRate / targetRate;
   }
-  return output;
+
+  process(input: Float32Array): Float32Array {
+    if (this.sourceRate === this.targetRate) return input;
+    if (input.length === 0) return new Float32Array();
+
+    const out: number[] = [];
+    let pos = this.phase;
+
+    // To support interpolation at the very start, use lastSample from prior buffer if needed.
+    const firstSample = pos < 1 ? this.lastSample : input[0];
+
+    while (pos < input.length) {
+      const i = Math.floor(pos);
+      const frac = pos - i;
+      const s0 = i >= 0 ? (i === 0 ? firstSample : input[i]) : firstSample;
+      const s1 = i + 1 < input.length ? input[i + 1] : input[input.length - 1];
+      const sample = s0 + (s1 - s0) * frac;
+      out.push(sample);
+      pos += this.ratio;
+    }
+
+    // Carry fractional position and last sample forward for continuity.
+    this.phase = pos - input.length;
+    this.lastSample = input[input.length - 1];
+    return new Float32Array(out);
+  }
+}
+
+function applyGain(input: Float32Array, gain: number): Float32Array {
+  if (gain === 1) return input;
+  const out = new Float32Array(input.length);
+  for (let i = 0; i < input.length; i++) {
+    out[i] = input[i] * gain;
+  }
+  return out;
 }
