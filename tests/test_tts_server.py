@@ -1,7 +1,9 @@
+import boto3
 import pytest
 from fastapi.testclient import TestClient
 
-import tts_server
+import backend
+from agentic_editor.tts import build_document_state, map_elapsed_time_to_document
 
 
 @pytest.fixture(scope="session")
@@ -16,8 +18,8 @@ def sample_document(tmp_path_factory):
 def document_state(sample_document, tmp_path_factory):
     _path, doc_text = sample_document
     cache_dir = tmp_path_factory.mktemp("cache")
-    session = tts_server.boto3.Session()
-    return tts_server.build_document_state(
+    session = boto3.Session()
+    return build_document_state(
         document_text=doc_text,
         voice_id="Joanna",
         chunking_strategy="paragraph",
@@ -31,13 +33,13 @@ def test_chunking_and_mapping(document_state):
     # Expect two chunks split by blank lines.
     assert len(document_state.chunks) == 2
     first = document_state.chunks[0]
-    mapping = tts_server.map_elapsed_time_to_document(first, elapsed_ms=0)
+    mapping = map_elapsed_time_to_document(first, elapsed_ms=0)
     assert mapping["chunk_id"] == 0
     assert mapping["doc_char_position"] == first.doc_char_start
 
 
 def test_api_endpoints(document_state):
-    app = tts_server.create_app(document_state)
+    app = backend.create_app(document_state)
     client = TestClient(app)
 
     status_resp = client.get("/status")
@@ -79,7 +81,7 @@ def test_stt_token_endpoint(document_state, monkeypatch):
 
     document_state.aws_session = FakeSession()
     document_state.region_name = "us-east-1"
-    app = tts_server.create_app(document_state)
+    app = backend.create_app(document_state)
     client = TestClient(app)
 
     resp = client.get("/stt_token")

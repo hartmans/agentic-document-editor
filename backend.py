@@ -7,146 +7,19 @@ interruption-to-text mapping.
 from __future__ import annotations
 
 import argparse
-import logging
 import json
-from dataclasses import dataclass, field
+import logging
 from pathlib import Path
-from typing import List, Sequence
+from typing import List
 
-import boto3
-from agentic_editor.tts_cache import TtsCache
-from botocore.exceptions import BotoCoreError, ClientError
+from agentic_editor.document import load_document
+from agentic_editor.tts import DocumentState, build_document_state, map_elapsed_time_to_document
+from botocore.exceptions import ClientError
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 import uvicorn
-
-
-# ----------------------------- Data models --------------------------------- #
-
-
-@dataclass
-class SpeechMark:
-    """Word- or sentence-level timing emitted by Polly."""
-
-    time_ms: int
-    mark_type: str
-    text: str
-    chunk_char_start: int
-    chunk_char_end: int
-
-
-@dataclass
-class TextChunk:
-    """Single contiguous span of the original document."""
-
-    chunk_id: int
-    text: str
-    doc_char_start: int
-    doc_char_end: int
-    audio_bytes: bytes
-    speech_marks: List[SpeechMark]
-    audio_mime_type: str = "audio/mpeg"
-
-
-@dataclass
-class DocumentState:
-    """In-memory representation of the preprocessed document."""
-
-    original_text: str
-    voice_id: str
-    chunking_strategy: str
-    chunks: List[TextChunk] = field(default_factory=list)
-    aws_session: boto3.Session | None = None
-    region_name: str | None = None
-
-
-# ----------------------------- Chunking ------------------------------------ #
-
-
-def chunk_document_paragraphs(document: str) -> List[tuple[int, int]]:
-    """
-    Split the document into contiguous spans separated by one or more blank lines.
-
-    Returns a list of (start, end) offsets into the original document.
-    """
-    import re
-
-    separator = re.compile(r"(?:\r?\n\s*){2,}")
-    spans: List[tuple[int, int]] = []
-    cursor = 0
-
-    for match in separator.finditer(document):
-        start = cursor
-        end = match.start()
-        cursor = match.end()
-        if start == end:
-            continue
-        text = document[start:end]
-        if text.strip() == "":
-            continue
-        spans.append((start, end))
-
-    if cursor < len(document):
-        trailing = document[cursor:]
-        if trailing.strip() != "":
-            spans.append((cursor, len(document)))
-
-    # If the document was entirely whitespace or separators, fall back to one chunk.
-    if not spans and document.strip() != "":
-        spans.append((0, len(document)))
-    return spans
-
-
-
-
-# ----------------------------- Mapping logic ------------------------------- #
-
-
-def _speech_marks_from_records(records: Sequence[dict]) -> List[SpeechMark]:
-    marks: List[SpeechMark] = []
-    for rec in records:
-        try:
-            marks.append(
-                SpeechMark(
-                    time_ms=int(rec["time_ms"]),
-                    mark_type=str(rec["mark_type"]),
-                    text=str(rec.get("text", "")),
-                    chunk_char_start=int(rec["chunk_char_start"]),
-                    chunk_char_end=int(rec["chunk_char_end"]),
-                )
-            )
-        except (KeyError, ValueError, TypeError):
-            continue
-    marks.sort(key=lambda m: m.time_ms)
-    return marks
-
-
-def map_elapsed_time_to_document(chunk: TextChunk, elapsed_ms: int) -> dict:
-    """Resolve an elapsed time within a chunk to document-level character offsets."""
-    word_marks = [m for m in chunk.speech_marks if m.mark_type == "word"]
-    if not word_marks:
-        raise ValueError("Chunk has no word-level speech marks to map time.")
-    # Ensure marks are time-sorted.
-    word_marks.sort(key=lambda m: m.time_ms)
-
-    target_mark = word_marks[0]
-    for mark in word_marks:
-        if mark.time_ms <= elapsed_ms:
-            target_mark = mark
-        else:
-            break
-
-    # Clamp to last word if elapsed exceeds final mark.
-    if elapsed_ms > word_marks[-1].time_ms:
-        target_mark = word_marks[-1]
-
-    return {
-        "chunk_id": chunk.chunk_id,
-        "elapsed_ms": elapsed_ms,
-        "doc_char_position": chunk.doc_char_start + target_mark.chunk_char_start,
-    }
 
 
 # ----------------------------- FastAPI models ------------------------------ #
@@ -278,67 +151,6 @@ def create_app(state: DocumentState) -> FastAPI:
             expiration=creds["Expiration"].isoformat() if hasattr(creds["Expiration"], "isoformat") else str(creds["Expiration"]),
         )
     return app
-
-
-# ----------------------------- Startup flow -------------------------------- #
-
-
-def load_document(path: Path) -> str:
-    if not path.exists() or not path.is_file():
-        raise FileNotFoundError(f"Document path not found or unreadable: {path}")
-    return path.read_text(encoding="utf-8")
-
-
-def build_document_state(
-    document_text: str,
-    voice_id: str,
-    chunking_strategy: str,
-    region_name: str,
-    cache_dir: Path,
-    session: boto3.Session | None = None,
-) -> DocumentState:
-    if chunking_strategy != "paragraph":
-        raise ValueError(f"Unsupported chunking strategy: {chunking_strategy}")
-
-    chunk_spans = chunk_document_paragraphs(document_text)
-    session = session or boto3.Session()
-    tts_cache = TtsCache(
-        cache_dir=cache_dir,
-        boto_session=session,
-        region_name=region_name,
-        voice_id=voice_id,
-    )
-    chunks: List[TextChunk] = []
-
-    for chunk_id, (start, end) in enumerate(chunk_spans):
-        text = document_text[start:end]
-        logging.info("Synthesizing chunk %s (%s chars)", chunk_id, len(text))
-        try:
-            audio_bytes, speech_mark_records = tts_cache[text]
-            speech_marks = _speech_marks_from_records(speech_mark_records)
-        except (BotoCoreError, ClientError, RuntimeError) as exc:
-            logging.error("Polly synthesis failed for chunk %s: %s", chunk_id, exc)
-            raise
-
-        chunks.append(
-            TextChunk(
-                chunk_id=chunk_id,
-                text=text,
-                doc_char_start=start,
-                doc_char_end=end,
-                audio_bytes=audio_bytes,
-                speech_marks=speech_marks,
-            )
-        )
-
-    return DocumentState(
-        original_text=document_text,
-        voice_id=voice_id,
-        chunking_strategy=chunking_strategy,
-        chunks=chunks,
-        aws_session=session,
-        region_name=region_name,
-    )
 
 
 def parse_args() -> argparse.Namespace:
