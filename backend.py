@@ -73,7 +73,7 @@ def create_app(state: DocumentState) -> FastAPI:
     @app.get("/status")
     def status():
         return {
-            "document_length": len(state.original_text),
+            "document_length": len(state.document),
             "chunk_count": len(state.chunks),
             "voice_id": state.voice_id,
             "chunking_strategy": "paragraph",
@@ -82,14 +82,14 @@ def create_app(state: DocumentState) -> FastAPI:
     @app.get("/document", response_model=DocumentResponseModel)
     def get_document():
         return DocumentResponseModel(
-            document=state.original_text,
+            document=state.document,
             chunks=[
                 DocumentChunkModel(
-                    chunk_id=c.chunk_id,
+                    chunk_id=i,
                     doc_char_start=c.doc_char_start,
                     doc_char_end=c.doc_char_end,
                 )
-                for c in state.chunks
+                for i, c in enumerate(state.chunks)
             ],
             voice_id=state.voice_id,
             chunking_strategy="paragraph",
@@ -109,7 +109,7 @@ def create_app(state: DocumentState) -> FastAPI:
             chunk = state.chunks[request.chunk_id]
         except IndexError:
             raise HTTPException(status_code=404, detail="Unknown chunk_id") from None
-        mapping = map_elapsed_time_to_document(chunk, request.elapsed_ms)
+        mapping = map_elapsed_time_to_document(chunk, request.chunk_id, request.elapsed_ms)
         return InterruptionResponse(**mapping)
 
     @app.get("/stt_token", response_model=StsTokenResponse)
