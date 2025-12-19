@@ -7,39 +7,13 @@ commands without re-running TTS.
 
 from __future__ import annotations
 
-from typing import Any, Mapping, MutableMapping
+from typing import Any, Annotated
 
-from langchain_core.tools import tool
+from langchain_core.tools import InjectedToolArg, tool
 
 from agentic_editor.document import DocumentState
 
 SEARCH_RADIUS = 400
-
-
-def _extract_document_state(state: Any) -> DocumentState:
-    """Pull a DocumentState off the injected state container.
-
-    Supports either attribute-style access (state.document) or mapping-style
-    access (state["document"]). Raises a ValueError if no DocumentState is
-    found so the model gets immediate feedback.
-    """
-
-    doc_state: DocumentState | None = None
-    if isinstance(state, Mapping) and "document" in state:
-        maybe_state = state["document"]
-        if isinstance(maybe_state, DocumentState):
-            doc_state = maybe_state
-
-    if doc_state is None and hasattr(state, "document"):
-        maybe_state = getattr(state, "document")
-        if isinstance(maybe_state, DocumentState):
-            doc_state = maybe_state
-
-    if doc_state is None:
-        raise ValueError(
-            "Injected state must include a DocumentState at `state.document`."
-        )
-    return doc_state
 
 
 @tool
@@ -48,28 +22,36 @@ def replace_text(
     old_text: str,
     new_text: str,
     *,
-    state: Any = None,
-    context: Any = None,
+    state: Annotated[Any, InjectedToolArg()],
+    context: Annotated[Any, InjectedToolArg()],
 ) -> str:
-    """Replace an exact substring in the document near a character offset.
+    """Replace an exact substring close to a character offset.
 
-    Model usage guidance:
-    - Provide `offset` near where you expect `old_text` to appear (0-based char).
-    - The tool searches up to SEARCH_RADIUS characters *forward* from offset
-      first. If not found, it searches the same window *backward* from offset.
-      The first exact match of `old_text` is replaced with `new_text`.
-    - The editable text lives in `state.document`, which is a `DocumentState`.
-      The function mutates that DocumentState in-place and also writes it back
-      to mapping-based state containers when possible.
-    - Chunking/audio metadata is intentionally ignored for now; this only keeps
-      the document text in sync.
-    - `context` is injected LangChain context (not used yet but accepted).
+    Args:
+        offset: 0-based character position near where `old_text` should appear.
+        old_text: Exact text to replace.
+        new_text: Replacement text.
+
+    Returns:
+        Human-readable summary of the edit that was applied.
+
+    Notes:
+        - Searches up to SEARCH_RADIUS characters forward from `offset`; if not
+          found, searches the same distance backward. The first exact match is
+          replaced.
+        - Requires an injected LangChain state object with `state.document`
+          containing a `DocumentState`. Audio/chunk metadata is intentionally
+          ignored for now.
     """
 
-    if state is None:
-        raise ValueError("Injected state is required to locate the document.")
+    if not hasattr(state, "document"):
+        raise ValueError("Injected state must expose `state.document`.")
 
-    doc_state = _extract_document_state(state)
+    doc_state_attr = getattr(state, "document")
+    if not isinstance(doc_state_attr, DocumentState):
+        raise ValueError("state.document must be a DocumentState.")
+
+    doc_state = doc_state_attr
     document = doc_state.document
 
     pivot = max(0, min(offset, len(document)))
@@ -88,11 +70,8 @@ def replace_text(
     updated = document[:index] + new_text + document[index + len(old_text) :]
     doc_state.document = updated
 
-    # Write back to mapping-style state so downstream runnables see the change.
-    if isinstance(state, MutableMapping):
-        state["document"] = doc_state
-    elif hasattr(state, "document"):
-        setattr(state, "document", doc_state)
+    # Update the injected container so downstream nodes observe the change.
+    setattr(state, "document", doc_state)
 
     return (
         f"Replaced text starting at char {index} with new_text; "
