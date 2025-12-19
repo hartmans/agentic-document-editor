@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Annotated
 
 from langchain_core.tools import InjectedToolArg, tool
+from langgraph.prebuilt.tool_node import InjectedState
 
 from agentic_editor.document import DocumentState
 
@@ -22,8 +23,8 @@ def replace_text(
     old_text: str,
     new_text: str,
     *,
-    state: Annotated[Any, InjectedToolArg()],
-    context: Annotated[Any, InjectedToolArg()],
+    state: Annotated[DocumentState, InjectedState("document")],
+    context: Annotated[Any, InjectedToolArg] = None,
 ) -> str:
     """Replace an exact substring close to a character offset.
 
@@ -39,19 +40,11 @@ def replace_text(
         - Searches up to SEARCH_RADIUS characters forward from `offset`; if not
           found, searches the same distance backward. The first exact match is
           replaced.
-        - Requires an injected LangChain state object with `state.document`
-          containing a `DocumentState`. Audio/chunk metadata is intentionally
-          ignored for now.
+        - Requires injected state carrying `document: DocumentState`; only the
+          text is updated (chunk/audio metadata is ignored).
     """
 
-    if not hasattr(state, "document"):
-        raise ValueError("Injected state must expose `state.document`.")
-
-    doc_state_attr = getattr(state, "document")
-    if not isinstance(doc_state_attr, DocumentState):
-        raise ValueError("state.document must be a DocumentState.")
-
-    doc_state = doc_state_attr
+    doc_state = state
     document = doc_state.document
 
     pivot = max(0, min(offset, len(document)))
@@ -69,9 +62,6 @@ def replace_text(
 
     updated = document[:index] + new_text + document[index + len(old_text) :]
     doc_state.document = updated
-
-    # Update the injected container so downstream nodes observe the change.
-    setattr(state, "document", doc_state)
 
     return (
         f"Replaced text starting at char {index} with new_text; "
