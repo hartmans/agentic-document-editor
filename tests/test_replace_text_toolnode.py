@@ -2,13 +2,24 @@ from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.prebuilt import ToolNode
+from langgraph.types import Command
 
 from agentic_editor.document import DocumentState
+from agentic_editor.graph import DocumentUpdate
 from agentic_editor.tools import replace_text
 
 
+class StubTtsCache:
+    def __getitem__(self, text: str):
+        raise AssertionError("replace_text should not access TTS cache")
+
+
 def test_replace_text_toolnode_executes():
-    doc_state = DocumentState(document="Hello world", voice_id="Joanna")
+    doc_state = DocumentState(
+        document="Hello world",
+        voice_id="Joanna",
+        tts_cache=StubTtsCache(),
+    )
     tool_node = ToolNode([replace_text])
 
     ai_msg = AIMessage(
@@ -29,6 +40,18 @@ def test_replace_text_toolnode_executes():
         runtime=runtime,
     )
 
-    # ToolNode should have appended a ToolMessage and updated state.document
-    assert isinstance(result["messages"][-1], ToolMessage)
-    assert doc_state.document == "Hi world"
+    assert isinstance(result, list)
+    assert len(result) == 1
+    assert isinstance(result[0], Command)
+    update = result[0].update
+    # ToolNode should have appended a ToolMessage and returned a document update.
+    assert isinstance(update["messages"][-1], ToolMessage)
+    assert update["messages"][-1].tool_call_id == "call_1"
+    expected_update = DocumentUpdate(
+        offset=0,
+        length=5,
+        new_text="Hi",
+    )
+    assert isinstance(update["document_update"], DocumentUpdate)
+    assert update["document_update"] == expected_update
+    assert doc_state.document == "Hello world"

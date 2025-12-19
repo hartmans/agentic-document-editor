@@ -3,10 +3,30 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Sequence, Tuple
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+
+from agentic_editor.speech_marks import SpeechMark
+
+
+def _speech_marks_from_records(records: Sequence[dict]) -> List[SpeechMark]:
+    """Convert raw speech mark records to word-level SpeechMark objects."""
+    marks: List[SpeechMark] = []
+    for rec in records:
+        try:
+            marks.append(
+                SpeechMark(
+                    time_ms=int(rec["time_ms"]),
+                    chunk_char_start=int(rec["chunk_char_start"]),
+                    chunk_char_end=int(rec["chunk_char_end"]),
+                )
+            )
+        except (KeyError, ValueError, TypeError):
+            continue
+    marks.sort(key=lambda m: m.time_ms)
+    return marks
 
 
 class TtsCache:
@@ -29,22 +49,23 @@ class TtsCache:
         self.session = boto_session or boto3.Session()
         self.client = self.session.client("polly", region_name=region_name)
 
-    def __getitem__(self, text: str) -> Tuple[bytes, List[dict]]:
+    def __getitem__(self, text: str) -> Tuple[bytes, List[SpeechMark]]:
         key = self._key(text)
         audio_path = self.cache_dir / f"{key}.mp3"
         meta_path = self.cache_dir / f"{key}.json"
         if audio_path.exists() and meta_path.exists():
             audio = audio_path.read_bytes()
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            return audio, meta.get("speech_marks", [])
+            records = meta.get("speech_marks", [])
+            return audio, _speech_marks_from_records(records)
 
-        audio_bytes, speech_marks = self._synthesize(text)
+        audio_bytes, records = self._synthesize(text)
         audio_path.write_bytes(audio_bytes)
         meta_path.write_text(
-            json.dumps({"speech_marks": speech_marks}, ensure_ascii=False, indent=2),
+            json.dumps({"speech_marks": records}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        return audio_bytes, speech_marks
+        return audio_bytes, _speech_marks_from_records(records)
 
     def _key(self, text: str) -> str:
         h = hashlib.sha256()

@@ -4,14 +4,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
 
+from .speech_marks import SpeechMark
+from .tts_cache import TtsCache
 
 @dataclass
-class SpeechMark:
-    """Maps time within an audio stream to a character offset within the chunk."""
-
-    time_ms: int
-    chunk_char_start: int
-    chunk_char_end: int
+class DocumentUpdate:
+    offset: int
+    length: int
+    new_text: str
 
 
 @dataclass
@@ -32,6 +32,7 @@ class DocumentState:
 
     document:str #: Original text of the document
     voice_id: str
+    tts_cache: TtsCache
     chunks: List[TextChunk] = field(default_factory=list)
     aws_session: object | None = None  # boto3.Session | None, kept loose to avoid hard dep
     region_name: str | None = None
@@ -71,6 +72,24 @@ def chunk_documents(document: str) -> List[tuple[int, int]]:
     return spans
 
 
+def apply_document_update(update: DocumentUpdate, state: DocumentState) -> DocumentState:
+    """Return a new DocumentState after applying a document update."""
+    updated_document = (
+        state.document[: update.offset]
+        + update.new_text
+        + state.document[update.offset + update.length :]
+    )
+    from agentic_editor.tts import build_document_state
+
+    return build_document_state(
+        document_text=updated_document,
+        voice_id=state.voice_id,
+        region_name=state.region_name, # type: ignore
+        tts_cache=state.tts_cache,
+        session=state.aws_session, # type: ignore
+    )
+
+
 def load_document(path: Path) -> str:
     """Read a UTF-8 text document from disk."""
     if not path.exists() or not path.is_file():
@@ -83,5 +102,6 @@ __all__ = [
     "TextChunk",
     "DocumentState",
     "chunk_documents",
+    'apply_document_update',
     "load_document",
 ]

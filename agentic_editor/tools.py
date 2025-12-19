@@ -1,18 +1,14 @@
-"""LangChain tools for editing the in-memory document state.
-
-This module intentionally ignores audio/chunk bookkeeping. It focuses purely
-on updating the `DocumentState.document` text so the LLM can issue small edit
-commands without re-running TTS.
-"""
 
 from __future__ import annotations
 
 from typing import Any, Annotated
-
-from langchain_core.tools import InjectedToolArg, tool
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import InjectedToolArg, InjectedToolCallId, tool
+from langgraph.types import Command
 from langgraph.prebuilt.tool_node import InjectedState
 
 from agentic_editor.document import DocumentState
+from agentic_editor.graph import DocumentUpdate
 
 SEARCH_RADIUS = 400
 
@@ -25,7 +21,8 @@ def replace_text(
     *,
     state: Annotated[DocumentState, InjectedState("document")],
     context: Annotated[Any, InjectedToolArg] = None,
-) -> str:
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command|str:
     """Replace an exact substring close to a character offset.
 
     Args:
@@ -40,8 +37,6 @@ def replace_text(
         - Searches up to SEARCH_RADIUS characters forward from `offset`; if not
           found, searches the same distance backward. The first exact match is
           replaced.
-        - Requires injected state carrying `document: DocumentState`; only the
-          text is updated (chunk/audio metadata is ignored).
     """
 
     doc_state = state
@@ -58,15 +53,17 @@ def replace_text(
         index = document.rfind(old_text, backward_start, pivot)
 
     if index == -1:
-        raise ValueError("old_text was not found near the provided offset.")
-
+        return f"'Error: Unable to find `{old_text}' near offset {offset}; around that position I actually found {document[offset:offset+SEARCH_RADIUS]}. Update your request and resubmit."
     updated = document[:index] + new_text + document[index + len(old_text) :]
-    doc_state.document = updated
-
-    return (
-        f"Replaced text starting at char {index} with new_text; "
-        f"new document length is {len(updated)}."
-    )
-
+    return Command(update={
+        'document_update': DocumentUpdate(
+            offset=index,
+            length=len(old_text),
+            new_text=new_text),
+            'messages': [ToolMessage(
+                content="Document updated. Now describe your change so the user knows what you did.",
+                tool_call_id=tool_call_id,
+            )],
+    })
 
 __all__ = ["replace_text"]
