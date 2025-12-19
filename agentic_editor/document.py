@@ -1,10 +1,43 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Tuple
+from typing import List
 
 
-def chunk_document_paragraphs(document: str) -> List[tuple[int, int]]:
+@dataclass
+class SpeechMark:
+    """Maps time within an audio stream to a character offset within the chunk."""
+
+    time_ms: int
+    chunk_char_start: int
+    chunk_char_end: int
+
+
+@dataclass
+class TextChunk:
+    """Single contiguous span of the original document."""
+
+    text: str
+    doc_char_start: int
+    doc_char_end: int
+    audio_bytes: bytes
+    speech_marks: List[SpeechMark]
+    audio_mime_type: str = "audio/mpeg"
+
+
+@dataclass
+class DocumentState:
+    """In-memory representation of the preprocessed document."""
+
+    document:str #: Original text of the document
+    voice_id: str
+    chunks: List[TextChunk] = field(default_factory=list)
+    aws_session: object | None = None  # boto3.Session | None, kept loose to avoid hard dep
+    region_name: str | None = None
+
+
+def chunk_documents(document: str) -> List[tuple[int, int]]:
     """
     Split the document into contiguous spans separated by one or more blank lines.
 
@@ -43,3 +76,12 @@ def load_document(path: Path) -> str:
     if not path.exists() or not path.is_file():
         raise FileNotFoundError(f"Document path not found or unreadable: {path}")
     return path.read_text(encoding="utf-8")
+
+
+__all__ = [
+    "SpeechMark",
+    "TextChunk",
+    "DocumentState",
+    "chunk_documents",
+    "load_document",
+]

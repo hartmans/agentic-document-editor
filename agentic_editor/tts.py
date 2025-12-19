@@ -1,62 +1,24 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Sequence
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
-from agentic_editor.document import chunk_document_paragraphs
+from agentic_editor.document import DocumentState, SpeechMark, TextChunk, chunk_documents
 from agentic_editor.tts_cache import TtsCache
 
 
-@dataclass
-class SpeechMark:
-    """Word- or sentence-level timing emitted by Polly."""
-
-    time_ms: int
-    mark_type: str
-    text: str
-    chunk_char_start: int
-    chunk_char_end: int
-
-
-@dataclass
-class TextChunk:
-    """Single contiguous span of the original document."""
-
-    chunk_id: int
-    text: str
-    doc_char_start: int
-    doc_char_end: int
-    audio_bytes: bytes
-    speech_marks: List[SpeechMark]
-    audio_mime_type: str = "audio/mpeg"
-
-
-@dataclass
-class DocumentState:
-    """In-memory representation of the preprocessed document."""
-
-    original_text: str
-    voice_id: str
-    chunking_strategy: str
-    chunks: List[TextChunk] = field(default_factory=list)
-    aws_session: boto3.Session | None = None
-    region_name: str | None = None
-
-
 def _speech_marks_from_records(records: Sequence[dict]) -> List[SpeechMark]:
+    """Convert raw speech mark records to word-level SpeechMark objects."""
     marks: List[SpeechMark] = []
     for rec in records:
         try:
             marks.append(
                 SpeechMark(
                     time_ms=int(rec["time_ms"]),
-                    mark_type=str(rec["mark_type"]),
-                    text=str(rec.get("text", "")),
                     chunk_char_start=int(rec["chunk_char_start"]),
                     chunk_char_end=int(rec["chunk_char_end"]),
                 )
@@ -67,13 +29,20 @@ def _speech_marks_from_records(records: Sequence[dict]) -> List[SpeechMark]:
     return marks
 
 
-def map_elapsed_time_to_document(chunk: TextChunk, elapsed_ms: int) -> dict:
+def map_elapsed_time_to_document(chunk: TextChunk, chunk_id: int, elapsed_ms: int) -> dict:
     """Resolve an elapsed time within a chunk to document-level character offsets."""
-    word_marks = [m for m in chunk.speech_marks if m.mark_type == "word"]
+    word_marks = chunk.speech_marks
     if not word_marks:
         raise ValueError("Chunk has no word-level speech marks to map time.")
-    # Ensure marks are time-sorted.
     word_marks.sort(key=lambda m: m.time_ms)
+
+    # Before first mark: clamp to start of chunk.
+    if elapsed_ms <= word_marks[0].time_ms:
+        return {
+            "chunk_id": chunk_id,
+            "elapsed_ms": elapsed_ms,
+            "doc_char_position": chunk.doc_char_start,
+        }
 
     target_mark = word_marks[0]
     for mark in word_marks:
@@ -82,12 +51,11 @@ def map_elapsed_time_to_document(chunk: TextChunk, elapsed_ms: int) -> dict:
         else:
             break
 
-    # Clamp to last word if elapsed exceeds final mark.
     if elapsed_ms > word_marks[-1].time_ms:
         target_mark = word_marks[-1]
 
     return {
-        "chunk_id": chunk.chunk_id,
+        "chunk_id": chunk_id,
         "elapsed_ms": elapsed_ms,
         "doc_char_position": chunk.doc_char_start + target_mark.chunk_char_start,
     }
@@ -96,15 +64,11 @@ def map_elapsed_time_to_document(chunk: TextChunk, elapsed_ms: int) -> dict:
 def build_document_state(
     document_text: str,
     voice_id: str,
-    chunking_strategy: str,
     region_name: str,
     cache_dir: Path,
     session: boto3.Session | None = None,
 ) -> DocumentState:
-    if chunking_strategy != "paragraph":
-        raise ValueError(f"Unsupported chunking strategy: {chunking_strategy}")
-
-    chunk_spans = chunk_document_paragraphs(document_text)
+    chunk_spans = chunk_documents(document_text)
     session = session or boto3.Session()
     tts_cache = TtsCache(
         cache_dir=cache_dir,
@@ -126,7 +90,6 @@ def build_document_state(
 
         chunks.append(
             TextChunk(
-                chunk_id=chunk_id,
                 text=text,
                 doc_char_start=start,
                 doc_char_end=end,
@@ -136,9 +99,8 @@ def build_document_state(
         )
 
     return DocumentState(
-        original_text=document_text,
+        document=document_text,
         voice_id=voice_id,
-        chunking_strategy=chunking_strategy,
         chunks=chunks,
         aws_session=session,
         region_name=region_name,

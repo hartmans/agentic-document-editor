@@ -22,7 +22,6 @@ def document_state(sample_document, tmp_path_factory):
     return build_document_state(
         document_text=doc_text,
         voice_id="Joanna",
-        chunking_strategy="paragraph",
         region_name="us-east-1",
         cache_dir=cache_dir,
         session=session,
@@ -33,7 +32,7 @@ def test_chunking_and_mapping(document_state):
     # Expect two chunks split by blank lines.
     assert len(document_state.chunks) == 2
     first = document_state.chunks[0]
-    mapping = map_elapsed_time_to_document(first, elapsed_ms=0)
+    mapping = map_elapsed_time_to_document(first, chunk_id=0, elapsed_ms=0)
     assert mapping["chunk_id"] == 0
     assert mapping["doc_char_position"] == first.doc_char_start
 

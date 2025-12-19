@@ -12,8 +12,8 @@ import logging
 from pathlib import Path
 from typing import List
 
-from agentic_editor.document import load_document
-from agentic_editor.tts import DocumentState, build_document_state, map_elapsed_time_to_document
+from agentic_editor.document import DocumentState, load_document
+from agentic_editor.tts import build_document_state, map_elapsed_time_to_document
 from botocore.exceptions import ClientError
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -76,7 +76,7 @@ def create_app(state: DocumentState) -> FastAPI:
             "document_length": len(state.original_text),
             "chunk_count": len(state.chunks),
             "voice_id": state.voice_id,
-            "chunking_strategy": state.chunking_strategy,
+            "chunking_strategy": "paragraph",
         }
 
     @app.get("/document", response_model=DocumentResponseModel)
@@ -92,7 +92,7 @@ def create_app(state: DocumentState) -> FastAPI:
                 for c in state.chunks
             ],
             voice_id=state.voice_id,
-            chunking_strategy=state.chunking_strategy,
+            chunking_strategy="paragraph",
         )
 
     @app.get("/chunks/{chunk_id}/audio")
@@ -173,11 +173,6 @@ def parse_args() -> argparse.Namespace:
         help="AWS region to use for Polly (default: us-east-1).",
     )
     parser.add_argument(
-        "--chunking-strategy",
-        default="paragraph",
-        help="Chunking strategy to use (default: paragraph).",
-    )
-    parser.add_argument(
         "--cache-dir",
         default=".tts_cache",
         help="Directory to store/retrieve cached TTS assets (default: .tts_cache).",
@@ -208,7 +203,6 @@ def main():
         state = build_document_state(
             document_text=document_text,
             voice_id=args.voice_id,
-            chunking_strategy=args.chunking_strategy,
             region_name=args.region,
             cache_dir=Path(args.cache_dir),
         )
