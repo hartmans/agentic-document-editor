@@ -18,20 +18,14 @@ export interface ChunkRef {
 }
 
 export interface ResumePoint {
-  chunkId: number;
-  offsetMs: number;
-  docCharPosition?: number;
-}
-
-export interface StopInfo {
   chunkId: number | null;
-  elapsedMs: number;
-  docCharPosition: number | null;
+  offsetMs: number;
+  docCharPosition?: number | null;
 }
 
 export interface DocumentPlaybackHandle {
   play: (resume?: ResumePoint) => Promise<void>;
-  stop: () => StopInfo;
+  stop: () => ResumePoint;
 }
 
 interface Props {
@@ -63,7 +57,6 @@ export function DocumentPlayback({
 
     useEffect(() => {
       if (interruptionPosition == null) return;
-      setHighlightRange({ start: interruptionPosition, end: interruptionPosition + 1 });
     }, [interruptionPosition]);
 
     async function loadBuffer(chunkId: number): Promise<AudioBuffer> {
@@ -103,10 +96,10 @@ export function DocumentPlayback({
       }
     }
 
-    function stopPlayback(): StopInfo {
+    function stopPlayback(): ResumePoint {
       const info = audioEngineRef.current?.getCurrentPlaybackInfo();
       audioEngineRef.current?.stop();
-      const elapsedMs =
+      const offsetMs =
         info && info.chunkStartTime != null
           ? Math.round((info.contextCurrentTime - info.chunkStartTime) * 1000)
           : 0;
@@ -114,7 +107,7 @@ export function DocumentPlayback({
       const docCharPosition = null;
       playingRef.current = false;
       onPlayingChange?.(false);
-      return { chunkId, elapsedMs, docCharPosition };
+      return { chunkId, offsetMs, docCharPosition };
     }
 
     useImperativeHandle(ref, () => ({

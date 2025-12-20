@@ -55,7 +55,7 @@ export function DocumentEditor() {
       setPlaying(false);
       setResumePoint({
         chunkId: info.chunkId ?? 0,
-        offsetMs: info.elapsedMs,
+        offsetMs: info.offsetMs,
         docCharPosition: info.docCharPosition ?? undefined,
       });
     }
@@ -66,7 +66,7 @@ export function DocumentEditor() {
     if (!info || info.chunkId == null) return;
     sendInterruption({
       chunk_id: info.chunkId,
-      elapsed_ms: info.elapsedMs,
+      elapsed_ms: info.offsetMs,
     });
   };
 
@@ -82,14 +82,6 @@ export function DocumentEditor() {
     } catch (err) {
       setError((err as Error).message);
     }
-  }
-
-  function handleSpeechStart(payload: {
-    preroll: Float32Array;
-    mediaStream: MediaStream;
-    sampleRate: number;
-  }) {
-    // handled inside VoiceInput now; no-op
   }
 
   if (!doc) return <div>Loading document...</div>;
