@@ -16,17 +16,17 @@ interface VoiceInputProps {
   * Decoupled from playback; emits onInterrupt when VAD fires or button pressed.
   */
 export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInputProps) {
-  const { audioContext, setAudioContext } = useContext(AudioCtx);
-  const [micEnabled, setMicEnabled] = useState(false);
-  const [micError, setMicError] = useState<string | null>(null);
+  const { audioContext, micStream } = useContext(AudioCtx);
   const [vadState, setVadState] = useState<VadState>("idle");
   const [vadThreshold, setVadThreshold] = useState(0.005);
   const [rms, setRms] = useState(0);
   const [instructions, setInstructions] = useState("");
   const sttRef = useRef<SpeechToText | null>(null);
 
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const rmsRef = useRef(0);
+  const vadThresholdRef = useRef(vadThreshold);
   const aboveCountRef = useRef(0);
   const triggeredRef = useRef(false);
 
@@ -53,112 +53,102 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
   const emitInterrupt = useEffectEvent(() => {
     onInterrupt();
   });
+
   useEffect(() => {
+    vadThresholdRef.current = vadThreshold;
+  }, [vadThreshold]);
+
+  useEffect(() => {
+    if (!audioContext || !micStream) return;
+    if (processorRef.current) return;
+
+    const source = audioContext.createMediaStreamSource(micStream);
+    sourceRef.current = source;
+
+    // Resize preroll to ~250ms at current sample rate
+    const prerollSamples = Math.max(1, Math.round(audioContext.sampleRate * 0.25));
+    prerollBufferRef.current = new Float32Array(prerollSamples);
+    prerollWriteIdxRef.current = 0;
+
+    const processor = audioContext.createScriptProcessor(1024, 1, 1);
+    processor.onaudioprocess = (event) => {
+      const input = event.inputBuffer.getChannelData(0);
+      // rms / VAD
+      let sum = 0;
+      for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+      const frameRms = Math.sqrt(sum / input.length);
+      setRms(frameRms);
+      rmsRef.current = frameRms;
+
+      const isAbove = frameRms >= vadThresholdRef.current;
+      if (isAbove) aboveCountRef.current += 1;
+      else aboveCountRef.current = Math.max(0, aboveCountRef.current - 1);
+
+      let stt = sttRef.current;
+      const justTriggered = !triggeredRef.current && aboveCountRef.current >= VAD_MIN_FRAMES;
+
+      if (justTriggered) {
+        triggeredRef.current = true;
+        setVadState("triggered");
+        if (!stt) {
+          const prerollCopy = linearizeRing(
+            prerollBufferRef.current,
+            prerollWriteIdxRef.current
+          );
+          stt = sttRef.current = new SpeechToText({
+            sampleRate: audioContext.sampleRate,
+            getRms: () => rmsRef.current,
+            vadThreshold: vadThresholdRef.current,
+            onFinal: (t) => appendInstruction(t),
+            onStop: () => handleStop(),
+          });
+          stt.queue_chunk(prerollCopy, true);
+          emitInterrupt();
+        }
+      }
+
+      // Send current frame if STT is active (including the frame that triggered it)
+      if (stt) {
+        stt.queue_chunk(input, false);
+      }
+
+      // update preroll ring AFTER using it to avoid including current frame twice
+      const buffer = prerollBufferRef.current;
+      let w = prerollWriteIdxRef.current;
+      for (let i = 0; i < input.length; i++) {
+        buffer[w] = input[i];
+        w = (w + 1) % buffer.length;
+      }
+      prerollWriteIdxRef.current = w;
+    };
+    source.connect(processor);
+    const gain = audioContext.createGain();
+    gain.gain.value = 0;
+    processor.connect(gain);
+    gain.connect(audioContext.destination);
+
+    processorRef.current = processor;
+    setVadState("listening");
+
     return () => {
-      processorRef.current?.disconnect();
-      audioContext?.close();
+      processor.disconnect();
+      source.disconnect();
+      processorRef.current = null;
+      sourceRef.current = null;
       if (sttRef.current) {
         sttRef.current.close();
         sttRef.current = null;
       }
     };
-  }, [audioContext]);
+  }, [audioContext, micStream]);
 
-  async function enableMic() {
-    setMicError(null);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1,
-        },
-      });
-      const ctx =
-        audioContext ?? new AudioContext({ latencyHint: "interactive" });
-      await ctx.resume();
-      const source = ctx.createMediaStreamSource(stream);
-      // Resize preroll to ~250ms at current sample rate
-      const prerollSamples = Math.max(1, Math.round(ctx.sampleRate * 0.25));
-      prerollBufferRef.current = new Float32Array(prerollSamples);
-      prerollWriteIdxRef.current = 0;
-
-      const processor =
-        processorRef.current || ctx.createScriptProcessor(1024, 1, 1);
-      processor.onaudioprocess = (event) => {
-        const input = event.inputBuffer.getChannelData(0);
-        // rms / VAD
-        let sum = 0;
-        for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
-        const frameRms = Math.sqrt(sum / input.length);
-        setRms(frameRms);
-        rmsRef.current = frameRms;
-
-        const isAbove = frameRms >= vadThreshold;
-        if (isAbove) aboveCountRef.current += 1;
-        else aboveCountRef.current = Math.max(0, aboveCountRef.current - 1);
-
-        let stt = sttRef.current;
-        const justTriggered = !triggeredRef.current && aboveCountRef.current >= VAD_MIN_FRAMES;
-
-        if (justTriggered) {
-          triggeredRef.current = true;
-          setVadState("triggered");
-          if (!stt) {
-            const prerollCopy = linearizeRing(
-              prerollBufferRef.current,
-              prerollWriteIdxRef.current
-            );
-            stt = sttRef.current = new SpeechToText({
-              sampleRate: ctx.sampleRate,
-              getRms: () => rmsRef.current,
-              vadThreshold,
-              onFinal: (t) => appendInstruction(t),
-              onStop: () => handleStop(),
-            });
-            stt.queue_chunk(prerollCopy, true);
-            emitInterrupt();
-          }
-        }
-
-        // Send current frame if STT is active (including the frame that triggered it)
-        if (stt) {
-          stt.queue_chunk(input, false);
-        }
-
-        // update preroll ring AFTER using it to avoid including current frame twice
-        const buffer = prerollBufferRef.current;
-        let w = prerollWriteIdxRef.current;
-        for (let i = 0; i < input.length; i++) {
-          buffer[w] = input[i];
-          w = (w + 1) % buffer.length;
-        }
-        prerollWriteIdxRef.current = w;
-      };
-      source.connect(processor);
-      const gain = ctx.createGain();
-      gain.gain.value = 0;
-      processor.connect(gain);
-      gain.connect(ctx.destination);
-
-      processorRef.current = processor;
-      setMicEnabled(true);
-      setVadState("listening");
-      setAudioContext(ctx);
-    } catch (err) {
-      setMicError((err as Error).message || "Failed to enable microphone");
-      setMicEnabled(false);
-    }
-  }
+  const micEnabled = Boolean(audioContext && micStream);
+  const controlsDisabled = Boolean(disabled || !micEnabled);
 
   return (
     <section style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
       <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-        <button onClick={enableMic} disabled={micEnabled || disabled}>
-          {micEnabled ? "Microphone enabled" : "Enable microphone"}
-        </button>
-        <button onClick={onInterrupt} disabled={!micEnabled}>
+        <button onClick={onInterrupt} disabled={controlsDisabled}>
           Interrupt now
         </button>
         <span>
@@ -176,7 +166,6 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
           style={{ marginLeft: "0.35rem" }}
         />
       </label>
-      {micError && <div style={{ color: "red" }}>{micError}</div>}
       <div aria-live="off" style={{ position: "absolute", left: "-9999px" }}>
         VAD {vadState} RMS {rms.toFixed(3)} threshold {vadThreshold.toFixed(3)}
       </div>
