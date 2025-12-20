@@ -14,6 +14,7 @@ export interface StatusResponse {
   chunkCount: number;
   voiceId: string;
   chunkingStrategy: string;
+  document: DocumentResponse;
 }
 
 export interface DocumentChunk {
@@ -76,12 +77,15 @@ export async function fetchStatus(): Promise<StatusResponse> {
   return handleJson(await fetch(join(API_BASE, "/status")));
 }
 
-export async function fetchDocument(): Promise<DocumentResponse> {
-  return handleJson(await fetch(join(API_BASE, "/document")));
+export async function fetchDocument(documentId: string): Promise<DocumentResponse> {
+  return handleJson(await fetch(join(API_BASE, `/document/${documentId}`)));
 }
 
-export async function fetchChunkAudio(chunkId: number): Promise<ArrayBuffer> {
-  const res = await fetch(join(API_BASE, `/chunks/${chunkId}/audio`));
+export async function fetchChunkAudio(
+  documentId: string,
+  chunkId: number
+): Promise<ArrayBuffer> {
+  const res = await fetch(join(API_BASE, `/chunks/${documentId}/${chunkId}/audio`));
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Audio fetch failed (${res.status}): ${text}`);

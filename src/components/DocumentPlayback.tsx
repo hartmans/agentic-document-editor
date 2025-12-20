@@ -23,17 +23,23 @@ export interface DocumentPlaybackHandle {
 }
 
 interface Props {
+  title?: string;
   documentText: string;
   chunks: ChunkRef[];
+  documentId: string;
   onPlayingChange?: (playing: boolean) => void;
   interruptionPosition?: number | null;
+  autoPlay?: boolean;
 }
 
 export function DocumentPlayback({
+  title = "Document",
   documentText,
   chunks,
+  documentId,
   onPlayingChange,
   interruptionPosition,
+  autoPlay = false,
   ref,
 }: Props & { ref?: Ref<DocumentPlaybackHandle> }) {
     const { audioContext } = useContext(AudioCtx);
@@ -50,6 +56,13 @@ export function DocumentPlayback({
     }, [audioContext]);
 
     useEffect(() => {
+      return () => {
+        playingRef.current = false;
+        audioEngineRef.current?.stop();
+      };
+    }, []);
+
+    useEffect(() => {
       if (interruptionPosition == null) return;
     }, [interruptionPosition]);
 
@@ -57,7 +70,7 @@ export function DocumentPlayback({
       const cached = buffersRef.current.get(chunkId);
       if (cached) return cached;
       if (!audioContext) throw new Error("AudioContext not ready");
-      const data = await fetchChunkAudio(chunkId);
+      const data = await fetchChunkAudio(documentId, chunkId);
       const buf = await audioContext.decodeAudioData(data.slice(0));
       buffersRef.current.set(chunkId, buf);
       return buf;
@@ -118,6 +131,13 @@ export function DocumentPlayback({
       stop: () => stopPlayback(),
     }));
 
+    useEffect(() => {
+      if (!autoPlay) return;
+      if (!audioContext) return;
+      if (!chunks.length) return;
+      void startChunk(0, 0, chunks[0].doc_char_start);
+    }, [autoPlay, audioContext, chunks]);
+
     const renderedText = useMemo(() => {
       if (!documentText) return "Loading document...";
       const anchor = highlightStart;
@@ -145,7 +165,7 @@ export function DocumentPlayback({
 
     return (
       <section style={{ border: "1px solid #ccc", padding: "0.75rem" }}>
-        <h3>Document</h3>
+        <h3>{title}</h3>
         <div
           style={{
             padding: "0.5rem",

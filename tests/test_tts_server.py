@@ -50,14 +50,16 @@ def test_api_endpoints(document_state, sample_document):
 
     status_resp = client.get("/status")
     assert status_resp.status_code == 200
-    assert status_resp.json()["chunkCount"] == 2
+    status_data = status_resp.json()
+    assert status_data["chunkCount"] == 2
+    assert status_data["document"]["chunks"][0]["chunk_id"] == 0
 
-    doc_resp = client.get("/document")
+    doc_resp = client.get(f"/document/{document_id}")
     assert doc_resp.status_code == 200
     doc = doc_resp.json()
     assert doc["chunks"][0]["chunk_id"] == 0
 
-    audio_resp = client.get("/chunks/0/audio")
+    audio_resp = client.get(f"/chunks/{document_id}/0/audio")
     assert audio_resp.status_code == 200
     assert audio_resp.content  # audio bytes present
 

@@ -100,6 +100,22 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _build_document_response(document_state: DocumentState) -> DocumentResponseModel:
+    return DocumentResponseModel(
+        document=document_state.document,
+        chunks=[
+            DocumentChunkModel(
+                chunk_id=i,
+                doc_char_start=c.doc_char_start,
+                doc_char_end=c.doc_char_end,
+            )
+            for i, c in enumerate(document_state.chunks)
+        ],
+        voice_id=document_state.voice_id,
+        chunking_strategy="paragraph",
+    )
+
+
 # ----------------------------- FastAPI app --------------------------------- #
 
 
@@ -121,34 +137,28 @@ def create_app(state: DocumentState, document_id: str) -> FastAPI:
     @app.get("/status")
     def status():
         document_state = app.state.document_state
+        document_response = _build_document_response(document_state).dict()
         return {
             "documentId": app.state.document_id,
             "documentLength": len(document_state.document),
             "chunkCount": len(document_state.chunks),
             "voiceId": document_state.voice_id,
             "chunkingStrategy": "paragraph",
+            "document": document_response,
         }
 
-    @app.get("/document", response_model=DocumentResponseModel)
-    def get_document():
-        document_state = app.state.document_state
-        return DocumentResponseModel(
-            document=document_state.document,
-            chunks=[
-                DocumentChunkModel(
-                    chunk_id=i,
-                    doc_char_start=c.doc_char_start,
-                    doc_char_end=c.doc_char_end,
-                )
-                for i, c in enumerate(document_state.chunks)
-            ],
-            voice_id=document_state.voice_id,
-            chunking_strategy="paragraph",
-        )
+    @app.get("/document/{document_id}", response_model=DocumentResponseModel)
+    def get_document(document_id: str):
+        document_state = app.state.documents.get(document_id)
+        if not document_state:
+            raise HTTPException(status_code=404, detail="Unknown document_id")
+        return _build_document_response(document_state)
 
-    @app.get("/chunks/{chunk_id}/audio")
-    def get_chunk_audio(chunk_id: int):
-        document_state = app.state.document_state
+    @app.get("/chunks/{document_id}/{chunk_id}/audio")
+    def get_chunk_audio(document_id: str, chunk_id: int):
+        document_state = app.state.documents.get(document_id)
+        if not document_state:
+            raise HTTPException(status_code=404, detail="Unknown document_id")
         try:
             chunk = document_state.chunks[chunk_id]
         except IndexError:

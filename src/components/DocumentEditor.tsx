@@ -17,6 +17,9 @@ import {
 
 export function DocumentEditor() {
   const [doc, setDoc] = useState<DocumentResponse | null>(null);
+  const [documentId, setDocumentId] = useState<string | null>(null);
+  const [responseDoc, setResponseDoc] = useState<DocumentResponse | null>(null);
+  const [responseDocumentId, setResponseDocumentId] = useState<string | null>(null);
   const [statusText, setStatusText] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -27,8 +30,9 @@ export function DocumentEditor() {
   useEffect(() => {
     (async () => {
       try {
-        const [status, document] = await Promise.all([fetchStatus(), fetchDocument()]);
-        setDoc(document);
+        const status = await fetchStatus();
+        setDoc(status.document);
+        setDocumentId(status.documentId);
         setStatusText(
           `Voice ${status.voiceId}, chunks ${status.chunkCount}, strategy ${status.chunkingStrategy}`
         );
@@ -61,11 +65,15 @@ export function DocumentEditor() {
         docCharPosition: info.docCharPosition ?? undefined,
       });
     }
+    setResponseDoc(null);
+    setResponseDocumentId(null);
   };
 
   const handleInterrupt = () => {
     const info = playbackRef.current?.stop();
     if (!info || info.chunkId == null) return;
+    setResponseDoc(null);
+    setResponseDocumentId(null);
     sendInterruption({
       chunk_id: info.chunkId,
       elapsed_ms: info.offsetMs,
@@ -98,19 +106,33 @@ export function DocumentEditor() {
       });
       setMessages(resp.messages);
       setResumePoint(resp.resumePoint);
+      setResponseDocumentId(resp.documentId);
+      const responseDocument = await fetchDocument(resp.documentId);
+      setResponseDoc(responseDocument);
     } catch (err) {
       setError((err as Error).message);
     }
   };
 
-  if (!doc) return <div>Loading document...</div>;
+  if (!doc || !documentId) return <div>Loading document...</div>;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
       <div>{statusText}</div>
       <VoiceInput onInterrupt={handleInterrupt} onInstructions={handleInstructions} />
+      {responseDoc && responseDocumentId && (
+        <DocumentPlayback
+          title="Response"
+          documentId={responseDocumentId}
+          documentText={responseDoc.document}
+          chunks={responseDoc.chunks}
+          autoPlay
+        />
+      )}
       <DocumentPlayback
         ref={playbackRef}
+        title="Document"
+        documentId={documentId}
         documentText={doc.document}
         chunks={doc.chunks}
         onPlayingChange={setPlaying}
