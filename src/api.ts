@@ -9,10 +9,11 @@ function join(base: string, path: string): string {
 }
 
 export interface StatusResponse {
-  document_length: number;
-  chunk_count: number;
-  voice_id: string;
-  chunking_strategy: string;
+  documentId: string;
+  documentLength: number;
+  chunkCount: number;
+  voiceId: string;
+  chunkingStrategy: string;
 }
 
 export interface DocumentChunk {
@@ -60,6 +61,7 @@ export interface InstructionsRequest {
 export interface InstructionsResponse {
   messages: MessageDict[];
   resumePoint: ResumePoint;
+  documentId: string;
 }
 
 async function handleJson<T>(res: Response): Promise<T> {

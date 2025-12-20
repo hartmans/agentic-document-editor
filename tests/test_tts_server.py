@@ -1,4 +1,5 @@
 import boto3
+import hashlib
 import pytest
 from fastapi.testclient import TestClient
 
@@ -37,13 +38,19 @@ def test_chunking_and_mapping(document_state):
     assert mapping["docCharPosition"] == first.doc_char_start
 
 
-def test_api_endpoints(document_state):
-    app = backend.create_app(document_state)
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_api_endpoints(document_state, sample_document):
+    path, _doc_text = sample_document
+    document_id = _sha256_text(str(path.resolve()))
+    app = backend.create_app(document_state, document_id)
     client = TestClient(app)
 
     status_resp = client.get("/status")
     assert status_resp.status_code == 200
-    assert status_resp.json()["chunk_count"] == 2
+    assert status_resp.json()["chunkCount"] == 2
 
     doc_resp = client.get("/document")
     assert doc_resp.status_code == 200
@@ -61,7 +68,9 @@ def test_api_endpoints(document_state):
     assert interrupt["docCharPosition"] >= 0
 
 
-def test_stt_token_endpoint(document_state, monkeypatch):
+def test_stt_token_endpoint(document_state, monkeypatch, sample_document):
+    path, _doc_text = sample_document
+    document_id = _sha256_text(str(path.resolve()))
     fake_creds = {
         "AccessKeyId": "AKIAFAKE",
         "SecretAccessKey": "SECRET",
@@ -80,7 +89,7 @@ def test_stt_token_endpoint(document_state, monkeypatch):
 
     document_state.aws_session = FakeSession()
     document_state.region_name = "us-east-1"
-    app = backend.create_app(document_state)
+    app = backend.create_app(document_state, document_id)
     client = TestClient(app)
 
     resp = client.get("/stt_token")

@@ -7,10 +7,11 @@ interruption-to-text mapping.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 from agentic_editor.document import (
     DocumentState,
@@ -24,7 +25,7 @@ from botocore.exceptions import ClientError
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from langchain_core.messages import AnyMessage, HumanMessage, messages_to_dict
+from langchain_core.messages import AnyMessage, AIMessage, HumanMessage, messages_to_dict
 from pydantic import BaseModel, Field
 import uvicorn
 
@@ -65,6 +66,7 @@ class InstructionsRequest(BaseModel):
 class InstructionsResponse(BaseModel):
     messages: List[dict]
     resumePoint: ResumePoint
+    documentId: str
 
 
 class StsTokenResponse(BaseModel):
@@ -94,12 +96,18 @@ def _update_resume_point(
     return ResumePoint(chunkId=chunk_id, offsetMs=0, docCharPosition=position)
 
 
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 # ----------------------------- FastAPI app --------------------------------- #
 
 
-def create_app(state: DocumentState) -> FastAPI:
+def create_app(state: DocumentState, document_id: str) -> FastAPI:
     app = FastAPI(title="Agentic Document TTS Server")
     app.state.document_state = state
+    app.state.document_id = document_id
+    app.state.documents: Dict[str, DocumentState] = {document_id: state}
     app.state.graph = build_graph()
 
     app.add_middleware(
@@ -114,10 +122,11 @@ def create_app(state: DocumentState) -> FastAPI:
     def status():
         document_state = app.state.document_state
         return {
-            "document_length": len(document_state.document),
-            "chunk_count": len(document_state.chunks),
-            "voice_id": document_state.voice_id,
-            "chunking_strategy": "paragraph",
+            "documentId": app.state.document_id,
+            "documentLength": len(document_state.document),
+            "chunkCount": len(document_state.chunks),
+            "voiceId": document_state.voice_id,
+            "chunkingStrategy": "paragraph",
         }
 
     @app.get("/document", response_model=DocumentResponseModel)
@@ -174,10 +183,31 @@ def create_app(state: DocumentState) -> FastAPI:
             output_state = result
         else:
             output_state = GraphState(**result)
+        response_message = None
+        if output_state.messages:
+            if isinstance(output_state.messages[-1], AIMessage):
+                response_message = output_state.messages[-1]
+            else:
+                raise RuntimeError('No AI response')
+            output_state.messages.append(response_message)
         app.state.document_state = output_state.document
+        app.state.documents[app.state.document_id] = output_state.document
+        response_text = response_message.content
+        if not isinstance(response_text, str):
+            response_text = json.dumps(response_text, ensure_ascii=True)
+        response_document_id = _sha256_text(response_text)
+        response_document_state = build_document_state(
+            document_text=response_text,
+            voice_id=document_state.voice_id,
+            region_name=document_state.region_name,
+            tts_cache=document_state.tts_cache,
+            session=document_state.aws_session,
+        )
+        app.state.documents[response_document_id] = response_document_state
         return InstructionsResponse(
             messages=messages_to_dict(output_state.messages),
             resumePoint=resume_point,
+            documentId=response_document_id,
         )
 
     @app.get("/stt_token", response_model=StsTokenResponse)
@@ -282,7 +312,8 @@ def main():
         logging.error("Failed to preprocess document: %s", exc)
         raise SystemExit(1) from exc
 
-    app = create_app(state)
+    document_id = _sha256_text(str(document_path.resolve()))
+    app = create_app(state, document_id)
     uvicorn.run(app, host=args.host, port=args.port)
 
 

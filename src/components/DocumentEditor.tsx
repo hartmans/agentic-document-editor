@@ -30,7 +30,7 @@ export function DocumentEditor() {
         const [status, document] = await Promise.all([fetchStatus(), fetchDocument()]);
         setDoc(document);
         setStatusText(
-          `Voice ${status.voice_id}, chunks ${status.chunk_count}, strategy ${status.chunking_strategy}`
+          `Voice ${status.voiceId}, chunks ${status.chunkCount}, strategy ${status.chunkingStrategy}`
         );
       } catch (err) {
         setError((err as Error).message);
