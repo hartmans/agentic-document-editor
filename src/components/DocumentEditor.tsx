@@ -2,16 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import {
   DocumentResponse,
   InterruptionRequest,
-  InterruptionResponse,
   fetchDocument,
   fetchStatus,
   postInterruption,
+  ResumePoint,
 } from "../api";
 import { VoiceInput } from "./VoiceInput";
 import {
   DocumentPlayback,
   DocumentPlaybackHandle,
-  ResumePoint,
 } from "./DocumentPlayback";
 
 export function DocumentEditor() {
@@ -72,13 +71,9 @@ export function DocumentEditor() {
 
   async function sendInterruption(payload: InterruptionRequest) {
     try {
-      const resp: InterruptionResponse = await postInterruption(payload);
+      const resp = await postInterruption(payload);
       setPlaying(false);
-      setResumePoint({
-        chunkId: resp.chunk_id,
-        offsetMs: resp.elapsed_ms,
-        docCharPosition: resp.doc_char_position,
-      });
+      setResumePoint(resp);
     } catch (err) {
       setError((err as Error).message);
     }

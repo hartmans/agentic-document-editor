@@ -9,18 +9,12 @@ import {
 } from "react";
 import { AudioEngine } from "../audio/AudioEngine";
 import { AudioCtx } from "../context/AudioContextProvider";
-import { fetchChunkAudio } from "../api";
+import { ResumePoint, fetchChunkAudio } from "../api";
 
 export interface ChunkRef {
   chunk_id: number;
   doc_char_start: number;
   doc_char_end: number;
-}
-
-export interface ResumePoint {
-  chunkId: number | null;
-  offsetMs: number;
-  docCharPosition?: number | null;
 }
 
 export interface DocumentPlaybackHandle {

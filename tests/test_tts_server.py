@@ -33,8 +33,8 @@ def test_chunking_and_mapping(document_state):
     assert len(document_state.chunks) == 2
     first = document_state.chunks[0]
     mapping = map_elapsed_time_to_document(first, chunk_id=0, elapsed_ms=0)
-    assert mapping["chunk_id"] == 0
-    assert mapping["doc_char_position"] == first.doc_char_start
+    assert mapping["chunkId"] == 0
+    assert mapping["docCharPosition"] == first.doc_char_start
 
 
 def test_api_endpoints(document_state):
@@ -57,8 +57,8 @@ def test_api_endpoints(document_state):
     interrupt_resp = client.post("/interruptions", json={"chunk_id": 0, "elapsed_ms": 0})
     assert interrupt_resp.status_code == 200
     interrupt = interrupt_resp.json()
-    assert interrupt["chunk_id"] == 0
-    assert interrupt["doc_char_position"] >= 0
+    assert interrupt["chunkId"] == 0
+    assert interrupt["docCharPosition"] >= 0
 
 
 def test_stt_token_endpoint(document_state, monkeypatch):

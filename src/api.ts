@@ -28,15 +28,15 @@ export interface DocumentResponse {
   chunking_strategy: string;
 }
 
+export interface ResumePoint {
+  chunkId: number | null;
+  offsetMs: number;
+  docCharPosition?: number | null;
+}
+
 export interface InterruptionRequest {
   chunk_id: number;
   elapsed_ms: number;
-}
-
-export interface InterruptionResponse {
-  chunk_id: number;
-  elapsed_ms: number;
-  doc_char_position: number;
 }
 
 export interface SttToken {
@@ -73,7 +73,7 @@ export async function fetchChunkAudio(chunkId: number): Promise<ArrayBuffer> {
 
 export async function postInterruption(
   payload: InterruptionRequest
-): Promise<InterruptionResponse> {
+): Promise<ResumePoint> {
   const res = await fetch(join(API_BASE, "/interruptions"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },

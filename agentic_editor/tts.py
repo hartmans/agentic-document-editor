@@ -21,9 +21,9 @@ def map_elapsed_time_to_document(chunk: TextChunk, chunk_id: int, elapsed_ms: in
     # Before first mark: clamp to start of chunk.
     if elapsed_ms <= word_marks[0].time_ms:
         return {
-            "chunk_id": chunk_id,
-            "elapsed_ms": elapsed_ms,
-            "doc_char_position": chunk.doc_char_start,
+            "chunkId": chunk_id,
+            "offsetMs": elapsed_ms,
+            "docCharPosition": chunk.doc_char_start,
         }
 
     target_mark = word_marks[0]
@@ -37,9 +37,9 @@ def map_elapsed_time_to_document(chunk: TextChunk, chunk_id: int, elapsed_ms: in
         target_mark = word_marks[-1]
 
     return {
-        "chunk_id": chunk_id,
-        "elapsed_ms": elapsed_ms,
-        "doc_char_position": chunk.doc_char_start + target_mark.chunk_char_start,
+        "chunkId": chunk_id,
+        "offsetMs": elapsed_ms,
+        "docCharPosition": chunk.doc_char_start + target_mark.chunk_char_start,
     }
 
 

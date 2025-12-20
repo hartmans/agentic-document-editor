@@ -43,10 +43,10 @@ class InterruptionRequest(BaseModel):
     elapsed_ms: int = Field(..., ge=0)
 
 
-class InterruptionResponse(BaseModel):
-    chunk_id: int
-    elapsed_ms: int
-    doc_char_position: int
+class ResumePoint(BaseModel):
+    chunkId: int
+    offsetMs: int
+    docCharPosition: int
 
 
 class StsTokenResponse(BaseModel):
@@ -103,14 +103,14 @@ def create_app(state: DocumentState) -> FastAPI:
             raise HTTPException(status_code=404, detail="Unknown chunk_id") from None
         return Response(content=chunk.audio_bytes, media_type=chunk.audio_mime_type)
 
-    @app.post("/interruptions", response_model=InterruptionResponse)
+    @app.post("/interruptions", response_model=ResumePoint)
     def map_interruption(request: InterruptionRequest):
         try:
             chunk = state.chunks[request.chunk_id]
         except IndexError:
             raise HTTPException(status_code=404, detail="Unknown chunk_id") from None
         mapping = map_elapsed_time_to_document(chunk, request.chunk_id, request.elapsed_ms)
-        return InterruptionResponse(**mapping)
+        return ResumePoint(**mapping)
 
     @app.get("/stt_token", response_model=StsTokenResponse)
     def get_stt_token():
