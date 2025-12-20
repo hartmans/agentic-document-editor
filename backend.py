@@ -25,7 +25,13 @@ from botocore.exceptions import ClientError
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from langchain_core.messages import AnyMessage, AIMessage, HumanMessage, messages_to_dict
+from langchain_core.messages import (
+    AnyMessage,
+    AIMessage,
+    HumanMessage,
+    messages_from_dict,
+    messages_to_dict,
+)
 from pydantic import BaseModel, Field
 import uvicorn
 
@@ -179,7 +185,11 @@ def create_app(state: DocumentState, document_id: str) -> FastAPI:
     async def handle_instructions(request: InstructionsRequest):
         document_state = app.state.document_state
         resume_point = request.resumePoint
-        messages = list(request.messages)
+        raw_messages = list(request.messages)
+        if raw_messages and isinstance(raw_messages[0], dict):
+            messages = list(messages_from_dict(raw_messages))
+        else:
+            messages = raw_messages
         messages.append(HumanMessage(content=request.instructions))
         graph_state = GraphState(
             document=document_state,
