@@ -34,6 +34,11 @@ export interface ResumePoint {
   docCharPosition?: number | null;
 }
 
+export interface MessageDict {
+  type: string;
+  data: Record<string, unknown>;
+}
+
 export interface InterruptionRequest {
   chunk_id: number;
   elapsed_ms: number;
@@ -44,6 +49,17 @@ export interface SttToken {
   secret_access_key: string;
   session_token: string;
   expiration: string;
+}
+
+export interface InstructionsRequest {
+  messages: MessageDict[];
+  instructions: string;
+  resumePoint: ResumePoint;
+}
+
+export interface InstructionsResponse {
+  messages: MessageDict[];
+  resumePoint: ResumePoint;
 }
 
 async function handleJson<T>(res: Response): Promise<T> {
@@ -84,4 +100,15 @@ export async function postInterruption(
 
 export async function fetchSttToken(): Promise<SttToken> {
   return handleJson(await fetch(join(API_BASE, "/stt_token")));
+}
+
+export async function postInstructions(
+  payload: InstructionsRequest
+): Promise<InstructionsResponse> {
+  const res = await fetch(join(API_BASE, "/instructions"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return handleJson(res);
 }

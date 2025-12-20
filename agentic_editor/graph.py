@@ -3,7 +3,7 @@ import typing
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.types import Overwrite
-from langchain_core.messages import BaseMessage, HumanMessage, AiMessage, ToolMessage               
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage               
 import langchain_core.language_models
 import dataclasses
 import hartmans_ai
@@ -40,8 +40,8 @@ async def llm_call(state: GraphState) -> GraphState:
     document_state = state.document
     document = document_state.document
     position = state.position or 0
-    before_text = document[min(position-FOCUS_RADIUS, 0):position]
-    after_text = document[position:max(position+FOCUS_RADIUS, len(document)-1)]
+    before_text = document[max(position-FOCUS_RADIUS, 0):position]
+    after_text = document[position:min(position+FOCUS_RADIUS, len(document)-1)]
     for i, message in reversed(list(enumerate(state.messages))):
         # Skip ToolMessages and AiMessages after the most recent HumanMessage; they are part of tool calls.
         if isinstance(message, HumanMessage):
@@ -73,9 +73,9 @@ async def final(state:GraphState)-> dict:
     '''
     def filter_message(m: BaseMessage)->bool:
         match m:
-            case ToolMessage:
+            case ToolMessage():
                 return False
-            case AiMessage(a) if a.tool_calls:
+            case AIMessage() as a if a.tool_calls:
                 return False
             case _:
                 return True

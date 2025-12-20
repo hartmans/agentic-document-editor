@@ -23,7 +23,10 @@ def replace_text(
     context: Annotated[Any, InjectedToolArg] = None,
     tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> Command|str:
-    """Replace an exact substring close to a character offset.
+    """Edit the document. This tool replaces the text *old_text* with the text *new_text* in the document. *offset* should be the character position at the beginning of *old_text*.
+    To delete text, Place the text to delete in *old_text* and include empty *new_text*.
+    To add new text, Use *old_text* as an anchor for where the new text should be added, and include the contents of *old_text* in *new_text* so that text is added.
+    
 
     Args:
         offset: 0-based character position near where `old_text` should appear.

@@ -50,6 +50,9 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
     console.log('instructions:', instructions);
   });
 
+  const emitInterrupt = useEffectEvent(() => {
+    onInterrupt();
+  });
   useEffect(() => {
     return () => {
       processorRef.current?.disconnect();
@@ -115,7 +118,7 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
               onStop: () => handleStop(),
             });
             stt.queue_chunk(prerollCopy, true);
-            onInterrupt();
+            emitInterrupt();
           }
         }
 

@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import {
   DocumentResponse,
   InterruptionRequest,
+  MessageDict,
   fetchDocument,
   fetchStatus,
+  postInstructions,
   postInterruption,
   ResumePoint,
 } from "../api";
@@ -19,6 +21,7 @@ export function DocumentEditor() {
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [resumePoint, setResumePoint] = useState<ResumePoint | null>(null);
+  const [messages, setMessages] = useState<MessageDict[]>([]);
   const playbackRef = useRef<DocumentPlaybackHandle | null>(null);
 
   useEffect(() => {
@@ -79,12 +82,33 @@ export function DocumentEditor() {
     }
   }
 
+  const handleInstructions = async (instructions: string) => {
+    const trimmed = instructions.trim();
+    if (!trimmed) return;
+    const safeResumePoint = {
+      chunkId: resumePoint?.chunkId ?? 0,
+      offsetMs: resumePoint?.offsetMs ?? 0,
+      docCharPosition: resumePoint?.docCharPosition ?? 0,
+    };
+    try {
+      const resp = await postInstructions({
+        messages,
+        instructions: trimmed,
+        resumePoint: safeResumePoint,
+      });
+      setMessages(resp.messages);
+      setResumePoint(resp.resumePoint);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
   if (!doc) return <div>Loading document...</div>;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
       <div>{statusText}</div>
-      <VoiceInput onInterrupt={handleInterrupt} />
+      <VoiceInput onInterrupt={handleInterrupt} onInstructions={handleInstructions} />
       <DocumentPlayback
         ref={playbackRef}
         documentText={doc.document}

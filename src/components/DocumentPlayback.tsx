@@ -81,6 +81,8 @@ export function DocumentPlayback({
     }
 
     function handleNaturalEnd(finishedId: number) {
+      if (playingRef.current == false)
+        return;
       const nextId = finishedId + 1;
       if (nextId < chunks.length) {
         startChunk(nextId, 0, chunks[nextId].doc_char_start);
@@ -92,6 +94,7 @@ export function DocumentPlayback({
 
     function stopPlayback(): ResumePoint {
       const info = audioEngineRef.current?.getCurrentPlaybackInfo();
+      playingRef.current = false;
       audioEngineRef.current?.stop();
       const offsetMs =
         info && info.chunkStartTime != null
@@ -99,7 +102,6 @@ export function DocumentPlayback({
           : 0;
       const chunkId = info?.playingChunkId ?? currentChunkId;
       const docCharPosition = null;
-      playingRef.current = false;
       onPlayingChange?.(false);
       return { chunkId, offsetMs, docCharPosition };
     }

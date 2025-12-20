@@ -12,12 +12,19 @@ import logging
 from pathlib import Path
 from typing import List
 
-from agentic_editor.document import DocumentState, load_document
+from agentic_editor.document import (
+    DocumentState,
+    DocumentUpdate,
+    apply_document_update,
+    load_document,
+)
+from agentic_editor.graph import GraphState, build_graph
 from agentic_editor.tts import build_document_state, map_elapsed_time_to_document
 from botocore.exceptions import ClientError
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from langchain_core.messages import AnyMessage, HumanMessage, messages_to_dict
 from pydantic import BaseModel, Field
 import uvicorn
 
@@ -49,6 +56,17 @@ class ResumePoint(BaseModel):
     docCharPosition: int
 
 
+class InstructionsRequest(BaseModel):
+    messages: List[AnyMessage] = Field(default_factory=list)
+    instructions: str
+    resumePoint: ResumePoint
+
+
+class InstructionsResponse(BaseModel):
+    messages: List[dict]
+    resumePoint: ResumePoint
+
+
 class StsTokenResponse(BaseModel):
     access_key_id: str
     secret_access_key: str
@@ -56,11 +74,33 @@ class StsTokenResponse(BaseModel):
     expiration: str
 
 
+def _update_resume_point(
+    resume_point: ResumePoint,
+    update: DocumentUpdate,
+    state: DocumentState,
+) -> ResumePoint:
+    delta = len(update.new_text) - update.length
+    position = resume_point.docCharPosition
+    if update.offset <= position:
+        position = max(0, position + delta)
+    chunk_id = resume_point.chunkId
+    if state.chunks:
+        for idx, chunk in enumerate(state.chunks):
+            if chunk.doc_char_start <= position < chunk.doc_char_end:
+                chunk_id = idx
+                break
+        else:
+            chunk_id = len(state.chunks) - 1
+    return ResumePoint(chunkId=chunk_id, offsetMs=0, docCharPosition=position)
+
+
 # ----------------------------- FastAPI app --------------------------------- #
 
 
 def create_app(state: DocumentState) -> FastAPI:
     app = FastAPI(title="Agentic Document TTS Server")
+    app.state.document_state = state
+    app.state.graph = build_graph()
 
     app.add_middleware(
         CORSMiddleware,
@@ -72,51 +112,83 @@ def create_app(state: DocumentState) -> FastAPI:
 
     @app.get("/status")
     def status():
+        document_state = app.state.document_state
         return {
-            "document_length": len(state.document),
-            "chunk_count": len(state.chunks),
-            "voice_id": state.voice_id,
+            "document_length": len(document_state.document),
+            "chunk_count": len(document_state.chunks),
+            "voice_id": document_state.voice_id,
             "chunking_strategy": "paragraph",
         }
 
     @app.get("/document", response_model=DocumentResponseModel)
     def get_document():
+        document_state = app.state.document_state
         return DocumentResponseModel(
-            document=state.document,
+            document=document_state.document,
             chunks=[
                 DocumentChunkModel(
                     chunk_id=i,
                     doc_char_start=c.doc_char_start,
                     doc_char_end=c.doc_char_end,
                 )
-                for i, c in enumerate(state.chunks)
+                for i, c in enumerate(document_state.chunks)
             ],
-            voice_id=state.voice_id,
+            voice_id=document_state.voice_id,
             chunking_strategy="paragraph",
         )
 
     @app.get("/chunks/{chunk_id}/audio")
     def get_chunk_audio(chunk_id: int):
+        document_state = app.state.document_state
         try:
-            chunk = state.chunks[chunk_id]
+            chunk = document_state.chunks[chunk_id]
         except IndexError:
             raise HTTPException(status_code=404, detail="Unknown chunk_id") from None
         return Response(content=chunk.audio_bytes, media_type=chunk.audio_mime_type)
 
     @app.post("/interruptions", response_model=ResumePoint)
     def map_interruption(request: InterruptionRequest):
+        document_state = app.state.document_state
         try:
-            chunk = state.chunks[request.chunk_id]
+            chunk = document_state.chunks[request.chunk_id]
         except IndexError:
             raise HTTPException(status_code=404, detail="Unknown chunk_id") from None
         mapping = map_elapsed_time_to_document(chunk, request.chunk_id, request.elapsed_ms)
         return ResumePoint(**mapping)
 
+    @app.post("/instructions", response_model=InstructionsResponse)
+    async def handle_instructions(request: InstructionsRequest):
+        document_state = app.state.document_state
+        resume_point = request.resumePoint
+        messages = list(request.messages)
+        messages.append(HumanMessage(content=request.instructions))
+        graph_state = GraphState(
+            document=document_state,
+            position=resume_point.docCharPosition,
+            chunk_id=resume_point.chunkId,
+            elapsed_ms=resume_point.offsetMs,
+            messages=messages,
+        )
+        result = await app.state.graph.ainvoke(graph_state)
+        if isinstance(result, GraphState):
+            output_state = result
+        else:
+            output_state = GraphState(**result)
+        app.state.document_state = output_state.document
+        return InstructionsResponse(
+            messages=messages_to_dict(output_state.messages),
+            resumePoint=resume_point,
+        )
+
     @app.get("/stt_token", response_model=StsTokenResponse)
     def get_stt_token():
-        if state.aws_session is None or state.region_name is None:
+        document_state = app.state.document_state
+        if document_state.aws_session is None or document_state.region_name is None:
             raise HTTPException(status_code=500, detail="AWS session not configured")
-        client = state.aws_session.client("sts", region_name=state.region_name)
+        client = document_state.aws_session.client(
+            "sts",
+            region_name=document_state.region_name,
+        )
         policy = {
             "Version": "2012-10-17",
             "Statement": [

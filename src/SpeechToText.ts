@@ -155,7 +155,6 @@ export class SpeechToText {
 
   private async *pcmAudioIterator(signal: AbortSignal) {
     signal.addEventListener("abort", () => {
-      this.stopped = true;
       this.wakeIterator();
     });
 
