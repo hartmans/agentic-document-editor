@@ -105,7 +105,7 @@ export function DocumentEditor() {
       docCharPosition: resumePoint?.docCharPosition ?? 0,
     };
     try {
-      setVoiceMode((prev) => (prev === "idle" ? prev : "waiting"));
+      setVoiceMode('waiting');
       const resp = await postInstructions({
         messages,
         instructions: trimmed,

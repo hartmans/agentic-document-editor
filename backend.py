@@ -62,9 +62,8 @@ class ResumePoint(BaseModel):
     offsetMs: int
     docCharPosition: int
 
-
 class InstructionsRequest(BaseModel):
-    messages: List[AnyMessage] = Field(default_factory=list)
+    messages: List[dict] = Field(default_factory=list)
     instructions: str
     resumePoint: ResumePoint
 
@@ -209,7 +208,6 @@ def create_app(state: DocumentState, document_id: str) -> FastAPI:
                 response_message = output_state.messages[-1]
             else:
                 raise RuntimeError('No AI response')
-            output_state.messages.append(response_message)
         app.state.document_state = output_state.document
         app.state.documents[app.state.document_id] = output_state.document
         response_text = response_message.content

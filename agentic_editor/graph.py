@@ -35,7 +35,7 @@ class ConversationState(BaseModel):
     instructions:str = Field(description="Current instructions from the user")
     document: str = Field(description='Complete document being edited')
     
-async def llm_call(state: GraphState) -> GraphState:
+async def llm_call(state: GraphState) -> dict:
     assert state.document
     document_state = state.document
     document = document_state.document
@@ -64,8 +64,9 @@ Attached is conversation state in a JSON object. The user is editing the documen
 
 {conversation_state.json()}
     ''')
-    return GraphState(
-    messages = [await llm.ainvoke([message] + extra_messages)])
+    return {
+        'messages': [await llm.ainvoke([message] + extra_messages)]
+        }
 
 async def final(state:GraphState)-> dict:
     ''' 

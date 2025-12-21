@@ -3,7 +3,7 @@ import { AudioCtx } from "../context/AudioContextProvider";
 import { Instructions } from "./Instructions";
 import { SpeechToText } from "../SpeechToText";
 
-type VadState = "idle" | "listening" | "triggered";
+type VadState = "idle" | "listening" | "triggered"|"waiting";
 
 interface VoiceInputProps {
   onInterrupt: () => void;
@@ -45,10 +45,12 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
   });
 
   const handleStop = useEffectEvent(() => {
+  if (sttRef.current)
+     sttRef.current.close();
     sttRef.current = null;
     triggeredRef.current = false;
     aboveCountRef.current = 0;
-    setVadState("idle");
+    setVadState("waiting");
     emitInstructions(instructions);
     console.log("instructions:", instructions);
   });
@@ -70,6 +72,8 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
     }
     if (enabled && audioContext && micStream) {
       setVadState("listening");
+      triggeredRef.current = false;
+      setInstructions("");
     }
   }, [enabled, audioContext, micStream]);
 
