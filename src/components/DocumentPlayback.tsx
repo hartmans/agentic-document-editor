@@ -59,6 +59,7 @@ export function DocumentPlayback({
       return () => {
         playingRef.current = false;
         audioEngineRef.current?.stop();
+        audioEngineRef.current = null;
       };
     }, []);
 
@@ -85,6 +86,8 @@ export function DocumentPlayback({
           docCharPosition != null ? docCharPosition : chunk.doc_char_start;
         setHighlightStart(startPos);
       }
+      if (!audioEngineRef.current)
+        return;
       audioEngineRef.current.playChunk(chunkId, buffer, offsetMs / 1000, () =>
         handleNaturalEnd(chunkId)
       );
