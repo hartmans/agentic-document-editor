@@ -8,14 +8,14 @@ type VadState = "idle" | "listening" | "triggered";
 interface VoiceInputProps {
   onInterrupt: () => void;
   onInstructions?: (text: string) => void;
-  disabled?: boolean;
+  enabled?: boolean;
 }
 
 /**
   * Handles mic permission, simple VAD, and a 250ms preroll ring buffer.
   * Decoupled from playback; emits onInterrupt when VAD fires or button pressed.
   */
-export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInputProps) {
+export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: VoiceInputProps) {
   const { audioContext, micStream } = useContext(AudioCtx);
   const [vadState, setVadState] = useState<VadState>("idle");
   const [vadThreshold, setVadThreshold] = useState(0.005);
@@ -46,8 +46,11 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
 
   const handleStop = useEffectEvent(() => {
     sttRef.current = null;
+    triggeredRef.current = false;
+    aboveCountRef.current = 0;
+    setVadState("idle");
     emitInstructions(instructions);
-    console.log('instructions:', instructions);
+    console.log("instructions:", instructions);
   });
 
   const emitInterrupt = useEffectEvent(() => {
@@ -57,6 +60,18 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
   useEffect(() => {
     vadThresholdRef.current = vadThreshold;
   }, [vadThreshold]);
+
+  useEffect(() => {
+    if (!enabled) {
+      triggeredRef.current = false;
+      aboveCountRef.current = 0;
+      setVadState("idle");
+      return;
+    }
+    if (enabled && audioContext && micStream) {
+      setVadState("listening");
+    }
+  }, [enabled, audioContext, micStream]);
 
   useEffect(() => {
     if (!audioContext || !micStream) return;
@@ -72,6 +87,7 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
 
     const processor = audioContext.createScriptProcessor(1024, 1, 1);
     processor.onaudioprocess = (event) => {
+      if (!enabled) return;
       const input = event.inputBuffer.getChannelData(0);
       // rms / VAD
       let sum = 0;
@@ -128,7 +144,6 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
     gain.connect(audioContext.destination);
 
     processorRef.current = processor;
-    setVadState("listening");
 
     return () => {
       processor.disconnect();
@@ -140,10 +155,10 @@ export function VoiceInput({ onInterrupt, onInstructions, disabled }: VoiceInput
         sttRef.current = null;
       }
     };
-  }, [audioContext, micStream]);
+  }, [audioContext, micStream, enabled]);
 
   const micEnabled = Boolean(audioContext && micStream);
-  const controlsDisabled = Boolean(disabled || !micEnabled);
+  const controlsDisabled = Boolean(!micEnabled || !enabled);
 
   return (
     <section style={{ border: "1px solid #ccc", padding: "0.5rem" }}>

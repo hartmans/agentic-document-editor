@@ -23,6 +23,7 @@ export function DocumentEditor() {
   const [statusText, setStatusText] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
+  const [voiceMode, setVoiceMode] = useState<"idle" | "armed" | "waiting">("idle");
   const [resumePoint, setResumePoint] = useState<ResumePoint | null>(null);
   const [messages, setMessages] = useState<MessageDict[]>([]);
   const playbackRef = useRef<DocumentPlaybackHandle | null>(null);
@@ -48,6 +49,7 @@ export function DocumentEditor() {
         setError("Playback not ready. Enable microphone and wait a moment.");
         return;
       }
+      setVoiceMode("armed");
       await playbackRef.current.play(resumePoint ?? undefined);
       setPlaying(true);
     } catch (err) {
@@ -67,6 +69,7 @@ export function DocumentEditor() {
     }
     setResponseDoc(null);
     setResponseDocumentId(null);
+    setVoiceMode("idle");
   };
 
   const handleInterrupt = () => {
@@ -92,13 +95,17 @@ export function DocumentEditor() {
 
   const handleInstructions = async (instructions: string) => {
     const trimmed = instructions.trim();
-    if (!trimmed) return;
+    if (!trimmed) {
+      setVoiceMode((prev) => (prev === "idle" ? prev : "armed"));
+      return;
+    }
     const safeResumePoint = {
       chunkId: resumePoint?.chunkId ?? 0,
       offsetMs: resumePoint?.offsetMs ?? 0,
       docCharPosition: resumePoint?.docCharPosition ?? 0,
     };
     try {
+      setVoiceMode((prev) => (prev === "idle" ? prev : "waiting"));
       const resp = await postInstructions({
         messages,
         instructions: trimmed,
@@ -109,8 +116,10 @@ export function DocumentEditor() {
       setResponseDocumentId(resp.documentId);
       const responseDocument = await fetchDocument(resp.documentId);
       setResponseDoc(responseDocument);
+      setVoiceMode((prev) => (prev === "waiting" ? "armed" : prev));
     } catch (err) {
       setError((err as Error).message);
+      setVoiceMode((prev) => (prev === "waiting" ? "armed" : prev));
     }
   };
 
@@ -119,7 +128,11 @@ export function DocumentEditor() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
       <div>{statusText}</div>
-      <VoiceInput onInterrupt={handleInterrupt} onInstructions={handleInstructions} />
+      <VoiceInput
+        enabled={voiceMode === "armed"}
+        onInterrupt={handleInterrupt}
+        onInstructions={handleInstructions}
+      />
       {responseDoc && responseDocumentId && (
         <DocumentPlayback
           title="Response"
@@ -127,6 +140,9 @@ export function DocumentEditor() {
           documentText={responseDoc.document}
           chunks={responseDoc.chunks}
           autoPlay
+          onPlayingChange={(isPlaying) => {
+            if (isPlaying) setVoiceMode((prev) => (prev === "idle" ? prev : "armed"));
+          }}
         />
       )}
       <DocumentPlayback
@@ -135,13 +151,16 @@ export function DocumentEditor() {
         documentId={documentId}
         documentText={doc.document}
         chunks={doc.chunks}
-        onPlayingChange={setPlaying}
+        onPlayingChange={(isPlaying) => {
+          setPlaying(isPlaying);
+          if (isPlaying) setVoiceMode((prev) => (prev === "idle" ? prev : "armed"));
+        }}
       />
       <div style={{ display: "flex", gap: "0.5rem" }}>
         <button onClick={handlePlay} disabled={playing}>
           Play
         </button>
-        <button onClick={handleStop} disabled={!playing}>
+        <button onClick={handleStop} disabled={voiceMode !== "armed"}>
           Stop
         </button>
         <button onClick={handlePlay} disabled={!resumePoint || playing}>
