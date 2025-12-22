@@ -3,7 +3,7 @@ import typing
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.types import Overwrite
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage               
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
 import langchain_core.language_models
 import dataclasses
 import hartmans_ai
@@ -15,10 +15,17 @@ llm: langchain_core.language_models.BaseChatModel = hartmans_ai.local_llamacpp_m
 
 FOCUS_RADIUS = 150
 
+SYSTEM_PROMPT = '''
+You are a document editor assisting a writer in authoring a document. The document will be read to the author. They can interrupt the reading at any point with instructions for you.
+If you are instructed to change the document, use the replace_text tool to edit the document.
+If you are instructed to propose text, propose that text in your response; if it is approved then edit the document.
+'''
+
 @dataclasses.dataclass
 class GraphState:
 
-    document: DocumentState|None = None
+    document: typing.Optional[str] = None
+    document_state: DocumentState|None = None
     position: int|None = None
     chunk_id: int|None = None
     elapsed_ms:int|None = None
@@ -34,11 +41,14 @@ class ConversationState(BaseModel):
     after_text: str = Field(description='Text after position in the document')
     instructions:str = Field(description="Current instructions from the user")
     document: str = Field(description='Complete document being edited')
-    
+
+async def initial_node(state: GraphState)-> dict:
+    assert state.document_state
+    return {'document': state.document_state.document}
+
 async def llm_call(state: GraphState) -> dict:
     assert state.document
-    document_state = state.document
-    document = document_state.document
+    document = state.document
     position = state.position or 0
     before_text = document[max(position-FOCUS_RADIUS, 0):position]
     after_text = document[position:min(position+FOCUS_RADIUS, len(document)-1)]
@@ -65,7 +75,9 @@ Attached is conversation state in a JSON object. The user is editing the documen
 {conversation_state.json()}
     ''')
     return {
-        'messages': [await llm.ainvoke([message] + extra_messages)]
+        'messages': [await llm.ainvoke([
+            SystemMessage(content=SYSTEM_PROMPT),
+            message] + extra_messages)]
         }
 
 async def final(state:GraphState)-> dict:
@@ -82,11 +94,10 @@ async def final(state:GraphState)-> dict:
                 return True
     messages = [m for m in state.messages if filter_message(m)]
     results:dict[str, typing.Any] = {'messages': Overwrite(messages)}
-    if state.document_update:
-        assert state.document
-        results['document'] = apply_document_update(state.document_update, state.document)
-        results['position'] = state.document_update.offset
-        results['document_update'] = None
+    results['document'] = None
+    assert state.document_state
+    if state.document != state.document_state.document:
+        results['document_state'] = apply_document_update(state.document, state.document_state)
     return results
 
 def our_tool_node() -> ToolNode:
@@ -94,10 +105,12 @@ def our_tool_node() -> ToolNode:
 
 def build_graph():
     graph = StateGraph(GraphState)
+    graph.add_node('initial_node', initial_node)
     graph.add_node("llm_call", llm_call)
     graph.add_node("our_tool_node", our_tool_node())
     graph.add_node("final", final)
-    graph.set_entry_point("llm_call")
+    graph.set_entry_point("initial_node")
+    graph.add_edge('initial_node', 'llm_call')
     graph.add_conditional_edges("llm_call", tools_condition, {
         "tools": "our_tool_node",
         END: "final",

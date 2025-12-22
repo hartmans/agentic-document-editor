@@ -191,7 +191,7 @@ def create_app(state: DocumentState, document_id: str) -> FastAPI:
             messages = raw_messages
         messages.append(HumanMessage(content=request.instructions))
         graph_state = GraphState(
-            document=document_state,
+            document_state=document_state,
             position=resume_point.docCharPosition,
             chunk_id=resume_point.chunkId,
             elapsed_ms=resume_point.offsetMs,
@@ -208,8 +208,8 @@ def create_app(state: DocumentState, document_id: str) -> FastAPI:
                 response_message = output_state.messages[-1]
             else:
                 raise RuntimeError('No AI response')
-        app.state.document_state = output_state.document
-        app.state.documents[app.state.document_id] = output_state.document
+        app.state.document_state = output_state.document_state
+        app.state.documents[app.state.document_id] = output_state.document_state
         response_text = response_message.content
         if not isinstance(response_text, str):
             response_text = json.dumps(response_text, ensure_ascii=True)

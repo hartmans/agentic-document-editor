@@ -34,7 +34,7 @@ def replace_text(
         new_text: Replacement text.
 
     Returns:
-        Human-readable summary of the edit that was applied.
+        Instructions for the LLM.
 
     Notes:
         - Searches up to SEARCH_RADIUS characters forward from `offset`; if not
@@ -42,8 +42,7 @@ def replace_text(
           replaced.
     """
 
-    doc_state = state
-    document = doc_state.document
+    document = typing.cast(str, state.document)
 
     pivot = max(0, min(offset, len(document)))
 
@@ -59,10 +58,7 @@ def replace_text(
         return f"'Error: Unable to find `{old_text}' near offset {offset}; around that position I actually found {document[offset:offset+SEARCH_RADIUS]}. Update your request and resubmit."
     updated = document[:index] + new_text + document[index + len(old_text) :]
     return Command(update={
-        'document_update': DocumentUpdate(
-            offset=index,
-            length=len(old_text),
-            new_text=new_text),
+        'document': updated,
             'messages': [ToolMessage(
                 content="Document updated. Now describe your change so the user knows what you did.",
                 tool_call_id=tool_call_id,

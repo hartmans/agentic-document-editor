@@ -72,13 +72,9 @@ def chunk_documents(document: str) -> List[tuple[int, int]]:
     return spans
 
 
-def apply_document_update(update: DocumentUpdate, state: DocumentState) -> DocumentState:
+def apply_document_update(update: str, state: DocumentState) -> DocumentState:
     """Return a new DocumentState after applying a document update."""
-    updated_document = (
-        state.document[: update.offset]
-        + update.new_text
-        + state.document[update.offset + update.length :]
-    )
+    updated_document = update
     from agentic_editor.tts import build_document_state
 
     return build_document_state(
