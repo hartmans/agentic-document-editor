@@ -18,7 +18,7 @@ interface VoiceInputProps {
 export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: VoiceInputProps) {
   const { audioContext, micStream } = useContext(AudioCtx);
   const [vadState, setVadState] = useState<VadState>("idle");
-  const [vadThreshold, setVadThreshold] = useState(0.005);
+  const [vadThreshold, setVadThreshold] = useState(0.05);
   const [rms, setRms] = useState(0);
   const [instructions, setInstructions] = useState("");
   const sttRef = useRef<SpeechToText | null>(null);

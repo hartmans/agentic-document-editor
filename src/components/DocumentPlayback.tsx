@@ -22,6 +22,8 @@ export interface DocumentPlaybackHandle {
   stop: () => ResumePoint;
 }
 
+let globalComponentNumber = 0;
+
 interface Props {
   title?: string;
   documentText: string;
@@ -48,6 +50,7 @@ export function DocumentPlayback({
     const [currentChunkId, setCurrentChunkId] = useState<number | null>(null);
     const [highlightStart, setHighlightStart] = useState<number | null>(null);
     const playingRef = useRef(false);
+    const componentNumber = useMemo(() => {return ++globalComponentNumber}, []);
 
     useEffect(() => {
       if (audioContext) {
@@ -60,6 +63,7 @@ export function DocumentPlayback({
         playingRef.current = false;
         audioEngineRef.current?.stop();
         audioEngineRef.current = null;
+        console.log('DocumentPlayback cleanup', {componentNumber});
       };
     }, []);
 
@@ -138,6 +142,7 @@ export function DocumentPlayback({
       if (!autoPlay) return;
       if (!audioContext) return;
       if (!chunks.length) return;
+      console.log('DocumentPlayback autoplay', {componentNumber});
       void startChunk(0, 0, chunks[0].doc_char_start);
     }, [autoPlay, audioContext, chunks]);
 
