@@ -21,8 +21,6 @@ class TextChunk:
     text: str
     doc_char_start: int
     doc_char_end: int
-    audio_bytes: bytes
-    speech_marks: List[SpeechMark]
     audio_mime_type: str = "audio/mpeg"
 
 
@@ -79,10 +77,8 @@ def apply_document_update(update: str, state: DocumentState) -> DocumentState:
 
     return build_document_state(
         document_text=updated_document,
-        voice_id=state.voice_id,
-        region_name=state.region_name, # type: ignore
         tts_cache=state.tts_cache,
-        session=state.aws_session, # type: ignore
+        session=state.aws_session,  # type: ignore
     )
 
 

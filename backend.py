@@ -12,6 +12,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Dict, List
+import typing
 
 from agentic_editor.document import (
     DocumentState,
@@ -34,6 +35,7 @@ from langchain_core.messages import (
 )
 from pydantic import BaseModel, Field
 import uvicorn
+import yaml
 
 
 # ----------------------------- FastAPI models ------------------------------ #
@@ -168,7 +170,12 @@ def create_app(state: DocumentState, document_id: str) -> FastAPI:
             chunk = document_state.chunks[chunk_id]
         except IndexError:
             raise HTTPException(status_code=404, detail="Unknown chunk_id") from None
-        return Response(content=chunk.audio_bytes, media_type=chunk.audio_mime_type)
+        try:
+            audio_bytes, _ = document_state.tts_cache[chunk.text]
+        except Exception as exc:
+            logging.error("Failed to load audio for chunk %s: %s", chunk_id, exc)
+            raise HTTPException(status_code=500, detail="Failed to synthesize audio")
+        return Response(content=audio_bytes, media_type=chunk.audio_mime_type)
 
     @app.post("/interruptions", response_model=ResumePoint)
     def map_interruption(request: InterruptionRequest):
@@ -177,7 +184,12 @@ def create_app(state: DocumentState, document_id: str) -> FastAPI:
             chunk = document_state.chunks[request.chunk_id]
         except IndexError:
             raise HTTPException(status_code=404, detail="Unknown chunk_id") from None
-        mapping = map_elapsed_time_to_document(chunk, request.chunk_id, request.elapsed_ms)
+        mapping = map_elapsed_time_to_document(
+            document_state.tts_cache,
+            chunk,
+            request.chunk_id,
+            request.elapsed_ms,
+        )
         return ResumePoint(**mapping)
 
     @app.post("/instructions", response_model=InstructionsResponse)
@@ -216,8 +228,6 @@ def create_app(state: DocumentState, document_id: str) -> FastAPI:
         response_document_id = _sha256_text(response_text)
         response_document_state = build_document_state(
             document_text=response_text,
-            voice_id=document_state.voice_id,
-            region_name=document_state.region_name,
             tts_cache=document_state.tts_cache,
             session=document_state.aws_session,
         )
@@ -298,6 +308,10 @@ def parse_args() -> argparse.Namespace:
         help="Directory to store/retrieve cached TTS assets (default: .tts_cache).",
     )
     parser.add_argument(
+        "--config",
+        help="Optional YAML config file for TTS settings.",
+    )
+    parser.add_argument(
         "--host",
         default="0.0.0.0",
         help="Host for uvicorn to bind (default: 0.0.0.0).",
@@ -312,6 +326,27 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args()
     document_path = Path(args.document_path)
+    config: dict[str, typing.Any] = {}
+    if args.config:
+        config_path = Path(args.config)
+        try:
+            config_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logging.error("Failed to load config: %s", exc)
+            raise SystemExit(1) from exc
+        if config_data is None:
+            config_data = {}
+        if not isinstance(config_data, dict):
+            logging.error("Config file must contain a mapping object at top level.")
+            raise SystemExit(1)
+        config = config_data
+
+    if "voice_id" not in config:
+        config["voice_id"] = args.voice_id
+    if "region_name" not in config:
+        config["region_name"] = args.region
+    if "cache_dir" not in config:
+        config["cache_dir"] = args.cache_dir
 
     try:
         document_text = load_document(document_path)
@@ -322,9 +357,7 @@ def main():
     try:
         state = build_document_state(
             document_text=document_text,
-            voice_id=args.voice_id,
-            region_name=args.region,
-            cache_dir=Path(args.cache_dir),
+            config=config,
         )
     except Exception as exc:
         logging.error("Failed to preprocess document: %s", exc)

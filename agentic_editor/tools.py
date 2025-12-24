@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import typing
 from typing import Any, Annotated
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import InjectedToolArg, InjectedToolCallId, tool

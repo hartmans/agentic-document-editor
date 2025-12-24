@@ -47,11 +47,5 @@ def test_replace_text_toolnode_executes():
     # ToolNode should have appended a ToolMessage and returned a document update.
     assert isinstance(update["messages"][-1], ToolMessage)
     assert update["messages"][-1].tool_call_id == "call_1"
-    expected_update = DocumentUpdate(
-        offset=0,
-        length=5,
-        new_text="Hi",
-    )
-    assert isinstance(update["document_update"], DocumentUpdate)
-    assert update["document_update"] == expected_update
+    assert update["document"] == "Hi world"
     assert doc_state.document == "Hello world"

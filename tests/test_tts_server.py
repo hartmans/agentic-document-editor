@@ -22,10 +22,12 @@ def document_state(sample_document, tmp_path_factory):
     session = boto3.Session()
     return build_document_state(
         document_text=doc_text,
-        voice_id="Joanna",
-        region_name="us-east-1",
-        cache_dir=cache_dir,
         session=session,
+        config={
+            "voice_id": "Joanna",
+            "region_name": "us-east-1",
+            "cache_dir": str(cache_dir),
+        },
     )
 
 
@@ -33,7 +35,12 @@ def test_chunking_and_mapping(document_state):
     # Expect two chunks split by blank lines.
     assert len(document_state.chunks) == 2
     first = document_state.chunks[0]
-    mapping = map_elapsed_time_to_document(first, chunk_id=0, elapsed_ms=0)
+    mapping = map_elapsed_time_to_document(
+        document_state.tts_cache,
+        first,
+        chunk_id=0,
+        elapsed_ms=0,
+    )
     assert mapping["chunkId"] == 0
     assert mapping["docCharPosition"] == first.doc_char_start
 
