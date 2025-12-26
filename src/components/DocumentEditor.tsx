@@ -41,7 +41,7 @@ export function DocumentEditor() {
         setError((err as Error).message);
       }
     })();
-  }, []);
+  }, [responseDocumentId]);
 
   const handlePlay = async () => {
     try {

@@ -1,5 +1,7 @@
 import operator
+import os
 import typing
+from pathlib import Path
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.types import Overwrite
@@ -9,15 +11,26 @@ import dataclasses
 import hartmans_ai
 from .document import DocumentState, DocumentUpdate, apply_document_update
 from . import tools
+from .llm_logging import ChatMLJsonlCallbackHandler
 from pydantic import BaseModel, Field
 
-llm: langchain_core.language_models.BaseChatModel = hartmans_ai.local_llamacpp_model.build_langchain_model()
+def _build_llm() -> langchain_core.language_models.BaseChatModel:
+    log_path = os.environ.get("LLM_CHATML_LOG_PATH")
+    output_path = Path(log_path) if log_path else Path.cwd() / "logs" / "llm_chatml.jsonl"
+    handler = ChatMLJsonlCallbackHandler(output_path)
+    return hartmans_ai.local_llamacpp_model.build_langchain_model(
+        callbacks=[handler],
+    )
+
+
+llm: langchain_core.language_models.BaseChatModel = _build_llm()
 
 FOCUS_RADIUS = 150
-
+TOOLS = [tools.replace_text, tools.reposition_playback]
 SYSTEM_PROMPT = '''
 You are a document editor assisting a writer in authoring a document. The document will be read to the author. They can interrupt the reading at any point with instructions for you.
 If you are instructed to change the document, use the replace_text tool to edit the document.
+If you are instructed to jump to a position in the document or continue playback from a particular position use the reposition_playback tool.
 If you are instructed to propose text, propose that text in your response; if it is approved then edit the document.
 '''
 
@@ -48,6 +61,7 @@ async def initial_node(state: GraphState)-> dict:
 
 async def llm_call(state: GraphState) -> dict:
     assert state.document
+    tool_llm = llm.bind_tools(TOOLS)
     document = state.document
     position = state.position or 0
     before_text = document[max(position-FOCUS_RADIUS, 0):position]
@@ -75,7 +89,7 @@ Attached is conversation state in a JSON object. The user is editing the documen
 {conversation_state.json()}
     ''')
     return {
-        'messages': [await llm.ainvoke([
+        'messages': [await tool_llm.ainvoke([
             SystemMessage(content=SYSTEM_PROMPT),
             message] + extra_messages)]
         }
@@ -96,12 +110,12 @@ async def final(state:GraphState)-> dict:
     results:dict[str, typing.Any] = {'messages': Overwrite(messages)}
     results['document'] = None
     assert state.document_state
-    if state.document != state.document_state.document:
+    if state.document and (state.document != state.document_state.document):
         results['document_state'] = apply_document_update(state.document, state.document_state)
     return results
 
 def our_tool_node() -> ToolNode:
-    return ToolNode([tools.replace_text])
+    return ToolNode(TOOLS)
 
 def build_graph():
     graph = StateGraph(GraphState)

@@ -104,8 +104,7 @@ class ChatMLJsonlCallbackHandler(BaseCallbackHandler):
                     outputs.append({"role": "assistant", "content": _json_content(generation.text)})
         record = {
             "run_id": run_id,
-            "inputs": self._pending_inputs.pop(run_id, []),
-            "outputs": outputs,
+            "conversation": self._pending_inputs.pop(run_id, [])+outputs,
         }
         with self._lock:
             self.output_path.parent.mkdir(parents=True, exist_ok=True)
