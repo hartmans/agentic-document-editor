@@ -21,13 +21,10 @@ def _speech_marks_from_records(records: Sequence[dict]) -> List[SpeechMark]:
     marks: List[SpeechMark] = []
     for rec in records:
         try:
-            marks.append(
-                SpeechMark(
-                    time_ms=int(rec["time_ms"]),
-                    chunk_char_start=int(rec["chunk_char_start"]),
-                    chunk_char_end=int(rec["chunk_char_end"]),
-                )
-            )
+            if isinstance(rec, SpeechMark):
+                marks.append(rec)
+            else:
+                marks.append(SpeechMark.model_validate(rec))
         except (KeyError, ValueError, TypeError):
             continue
     marks.sort(key=lambda m: m.time_ms)
@@ -36,14 +33,7 @@ def _speech_marks_from_records(records: Sequence[dict]) -> List[SpeechMark]:
 
 def _speech_marks_to_records(marks: Sequence[SpeechMark]) -> List[dict]:
     """Serialize SpeechMark objects for JSON storage."""
-    return [
-        {
-            "time_ms": mark.time_ms,
-            "chunk_char_start": mark.chunk_char_start,
-            "chunk_char_end": mark.chunk_char_end,
-        }
-        for mark in marks
-    ]
+    return [mark.model_dump() for mark in marks]
 
 
 class TtsCache:
