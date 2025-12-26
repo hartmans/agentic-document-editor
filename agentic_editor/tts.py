@@ -6,7 +6,7 @@ import typing
 
 import boto3
 
-from agentic_editor.document import DocumentState, TextChunk, chunk_documents
+from agentic_editor.document import DocumentState, ResumePoint, TextChunk, chunk_documents
 from agentic_editor.tts_cache import TtsCache
 
 
@@ -43,6 +43,42 @@ def map_elapsed_time_to_document(
     }
 
 
+def map_doc_char_to_offset(state: DocumentState, position: int) -> ResumePoint:
+    """Resolve a document character offset to chunk id and audio offset."""
+    chunk_id = state.find_chunk_id(position)
+    if not state.chunks:
+        return ResumePoint(chunkId=0, offsetMs=0, docCharPosition=0)
+    chunk = state.chunks[chunk_id]
+    _, word_marks = state.tts_cache[chunk.text]
+    if not word_marks:
+        return ResumePoint(
+            chunkId=chunk_id,
+            offsetMs=0,
+            docCharPosition=chunk.doc_char_start,
+        )
+
+    relative_pos = max(0, position - chunk.doc_char_start)
+    target_mark = None
+    for mark in word_marks:
+        if mark.chunk_char_start <= relative_pos:
+            target_mark = mark
+        else:
+            break
+
+    if target_mark is None:
+        return ResumePoint(
+            chunkId=chunk_id,
+            offsetMs=0,
+            docCharPosition=chunk.doc_char_start,
+        )
+
+    return ResumePoint(
+        chunkId=chunk_id,
+        offsetMs=target_mark.time_ms,
+        docCharPosition=chunk.doc_char_start + target_mark.chunk_char_start,
+    )
+
+
 def build_document_state(
     document_text: str,
     *,
@@ -50,6 +86,7 @@ def build_document_state(
     session: boto3.Session | None = None,
     config: dict[str, typing.Any] | None = None,
     prefix: str = "",
+    position_hint: int | None = None,
 ) -> DocumentState:
     chunk_spans = chunk_documents(document_text)
     if tts_cache is None:
@@ -58,19 +95,15 @@ def build_document_state(
     else:
         session = session or getattr(tts_cache, "session", boto3.Session())
     chunks: List[TextChunk] = []
-
     for chunk_id, (start, end) in enumerate(chunk_spans):
         text = document_text[start:end]
-        logging.info("Submitting chunk %s (%s chars)", chunk_id, len(text))
         chunk = TextChunk(
             text=text,
             doc_char_start=start,
             doc_char_end=end,
         )
         chunks.append(chunk)
-        tts_cache.submit(text)
-
-    return DocumentState(
+    state = DocumentState(
         document=document_text,
         tts_cache=tts_cache,
         voice_id=tts_cache.voice_id,
@@ -78,11 +111,27 @@ def build_document_state(
         aws_session=session,
         region_name=tts_cache.region_name,
     )
+    if position_hint is not None and chunks:
+        preferred_chunk_id = state.find_chunk_id(position_hint)
+        logging.info("Submitting preferred chunk %s first", preferred_chunk_id)
+        tts_cache.submit(chunks[preferred_chunk_id].text)
+        for chunk_id, chunk in enumerate(chunks):
+            if chunk_id == preferred_chunk_id:
+                continue
+            logging.info("Submitting chunk %s (%s chars)", chunk_id, len(chunk.text))
+            tts_cache.submit(chunk.text)
+    else:
+        for chunk_id, chunk in enumerate(chunks):
+            logging.info("Submitting chunk %s (%s chars)", chunk_id, len(chunk.text))
+            tts_cache.submit(chunk.text)
+
+    return state
 
 
 __all__ = [
     "TextChunk",
     "DocumentState",
     "map_elapsed_time_to_document",
+    "map_doc_char_to_offset",
     "build_document_state",
 ]

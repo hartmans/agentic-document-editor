@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
 
+from pydantic import BaseModel
+
 from .speech_marks import SpeechMark
 from .tts_cache import TtsCache
 
@@ -24,6 +26,12 @@ class TextChunk:
     audio_mime_type: str = "audio/mpeg"
 
 
+class ResumePoint(BaseModel):
+    chunkId: int
+    offsetMs: int
+    docCharPosition: int
+
+
 @dataclass
 class DocumentState:
     """In-memory representation of the preprocessed document."""
@@ -34,6 +42,16 @@ class DocumentState:
     chunks: List[TextChunk] = field(default_factory=list)
     aws_session: object | None = None  # boto3.Session | None, kept loose to avoid hard dep
     region_name: str | None = None
+
+    def find_chunk_id(self, position: int) -> int:
+        if not self.chunks:
+            return 0
+        if position <= self.chunks[0].doc_char_start:
+            return 0
+        for idx, chunk in enumerate(self.chunks):
+            if chunk.doc_char_start <= position < chunk.doc_char_end:
+                return idx
+        return len(self.chunks) - 1
 
 
 def chunk_documents(document: str) -> List[tuple[int, int]]:
@@ -92,6 +110,7 @@ def load_document(path: Path) -> str:
 __all__ = [
     "SpeechMark",
     "TextChunk",
+    "ResumePoint",
     "DocumentState",
     "chunk_documents",
     'apply_document_update',

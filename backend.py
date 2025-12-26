@@ -16,18 +16,22 @@ import typing
 
 from agentic_editor.document import (
     DocumentState,
-    DocumentUpdate,
+    ResumePoint,
     apply_document_update,
     load_document,
 )
 from agentic_editor.graph import GraphState, build_graph
-from agentic_editor.tts import build_document_state, map_elapsed_time_to_document
+from agentic_editor.tts import (
+    build_document_state,
+    map_doc_char_to_offset,
+    map_elapsed_time_to_document,
+)
 from botocore.exceptions import ClientError
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from langchain_core.messages import (
-    AnyMessage,
+    BaseMessage,
     AIMessage,
     HumanMessage,
     messages_from_dict,
@@ -59,11 +63,6 @@ class InterruptionRequest(BaseModel):
     elapsed_ms: int = Field(..., ge=0)
 
 
-class ResumePoint(BaseModel):
-    chunkId: int
-    offsetMs: int
-    docCharPosition: int
-
 class InstructionsRequest(BaseModel):
     messages: List[dict] = Field(default_factory=list)
     instructions: str
@@ -81,26 +80,6 @@ class StsTokenResponse(BaseModel):
     secret_access_key: str
     session_token: str
     expiration: str
-
-
-def _update_resume_point(
-    resume_point: ResumePoint,
-    update: DocumentUpdate,
-    state: DocumentState,
-) -> ResumePoint:
-    delta = len(update.new_text) - update.length
-    position = resume_point.docCharPosition
-    if update.offset <= position:
-        position = max(0, position + delta)
-    chunk_id = resume_point.chunkId
-    if state.chunks:
-        for idx, chunk in enumerate(state.chunks):
-            if chunk.doc_char_start <= position < chunk.doc_char_end:
-                chunk_id = idx
-                break
-        else:
-            chunk_id = len(state.chunks) - 1
-    return ResumePoint(chunkId=chunk_id, offsetMs=0, docCharPosition=position)
 
 
 def _sha256_text(text: str) -> str:
@@ -130,7 +109,7 @@ def create_app(state: DocumentState, document_id: str) -> FastAPI:
     app = FastAPI(title="Agentic Document TTS Server")
     app.state.document_state = state
     app.state.document_id = document_id
-    app.state.documents: Dict[str, DocumentState] = {document_id: state}
+    app.state.documents  = {document_id: state}
     app.state.graph = build_graph()
 
     app.add_middleware(
@@ -196,11 +175,12 @@ def create_app(state: DocumentState, document_id: str) -> FastAPI:
     async def handle_instructions(request: InstructionsRequest):
         document_state = app.state.document_state
         resume_point = request.resumePoint
+        messages: list[BaseMessage]
         raw_messages = list(request.messages)
         if raw_messages and isinstance(raw_messages[0], dict):
             messages = list(messages_from_dict(raw_messages))
         else:
-            messages = raw_messages
+            messages = typing.cast(list[BaseMessage], raw_messages)
         messages.append(HumanMessage(content=request.instructions))
         graph_state = GraphState(
             document_state=document_state,
@@ -214,15 +194,13 @@ def create_app(state: DocumentState, document_id: str) -> FastAPI:
             output_state = result
         else:
             output_state = GraphState(**result)
-        response_message = None
-        if output_state.messages:
             if isinstance(output_state.messages[-1], AIMessage):
                 response_message = output_state.messages[-1]
             else:
                 raise RuntimeError('No AI response')
         app.state.document_state = output_state.document_state
         app.state.documents[app.state.document_id] = output_state.document_state
-        response_text = response_message.content
+        response_text = response_message.content # pyright: ignore[reportPossiblyUnboundVariable]
         if not isinstance(response_text, str):
             response_text = json.dumps(response_text, ensure_ascii=True)
         response_document_id = _sha256_text(response_text)
@@ -232,9 +210,15 @@ def create_app(state: DocumentState, document_id: str) -> FastAPI:
             session=document_state.aws_session,
         )
         app.state.documents[response_document_id] = response_document_state
+        if output_state.position:
+            updated_resume_point = map_doc_char_to_offset(
+                app.state.document_state, # type: ignore
+                output_state.position 
+            )
+        else: updated_resume_point = resume_point
         return InstructionsResponse(
             messages=messages_to_dict(output_state.messages),
-            resumePoint=resume_point,
+            resumePoint=updated_resume_point,
             documentId=response_document_id,
         )
 
