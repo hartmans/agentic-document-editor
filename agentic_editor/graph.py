@@ -3,8 +3,9 @@ import os
 import typing
 from pathlib import Path
 from langgraph.graph import StateGraph, END
+from langgraph.runtime import Runtime
 from langgraph.prebuilt import ToolNode, tools_condition
-from langgraph.types import Overwrite
+from langgraph.types import Overwrite, Command
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
 import langchain_core.language_models
 import dataclasses
@@ -114,14 +115,25 @@ async def final(state:GraphState)-> dict:
         results['document_state'] = apply_document_update(state.document, state.document_state)
     return results
 
-def our_tool_node() -> ToolNode:
-    return ToolNode(TOOLS)
+async def our_tool_node(state:GraphState, runtime:Runtime) -> Command | typing.Sequence[Command]:
+    node =  ToolNode(TOOLS)
+    default_destination = 'llm_call'
+    result = await node.ainvoke(state)
+    match result:
+        case Command(goto=dest) | [Command(goto=dest)]:
+            return result # already includes a destination
+        case Command(update=update) | [Command(update=update)]:
+            return Command(goto=default_destination, update=update)
+        case Command():
+            raise RuntimeError('A command we do not know how to handle; for example Send API')
+        case _:
+            return Command(goto=default_destination, update=result)
 
 def build_graph():
     graph = StateGraph(GraphState)
     graph.add_node('initial_node', initial_node)
     graph.add_node("llm_call", llm_call)
-    graph.add_node("our_tool_node", our_tool_node())
+    graph.add_node("our_tool_node", our_tool_node)
     graph.add_node("final", final)
     graph.set_entry_point("initial_node")
     graph.add_edge('initial_node', 'llm_call')
@@ -129,6 +141,5 @@ def build_graph():
         "tools": "our_tool_node",
         END: "final",
     })
-    graph.add_edge("our_tool_node", "llm_call")
     graph.set_finish_point("final")
     return graph.compile()

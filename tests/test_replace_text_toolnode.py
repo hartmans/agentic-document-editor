@@ -28,7 +28,12 @@ def test_replace_text_toolnode_executes():
             {
                 "id": "call_1",
                 "name": "replace_text",
-                "args": {"offset": 0, "old_text": "Hello", "new_text": "Hi"},
+                "args": {
+                    "before": "",
+                    "old_text": "Hello",
+                    "new_text": "Hi",
+                    "after": " world",
+                },
             }
         ],
     )
@@ -36,7 +41,11 @@ def test_replace_text_toolnode_executes():
     runtime = SimpleNamespace(context=None, store=None, stream_writer=None)
 
     result = tool_node.invoke(
-        {"messages": [ai_msg], "document": doc_state},
+        {
+            "messages": [ai_msg],
+            "document_state": doc_state,
+            "position": 0,
+        },
         runtime=runtime,
     )
 
