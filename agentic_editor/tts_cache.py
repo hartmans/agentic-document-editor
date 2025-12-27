@@ -16,17 +16,50 @@ from agentic_editor.speech_marks import SpeechMark
 _TTS_EXECUTOR = ThreadPoolExecutor(max_workers=6)
 
 
-def _speech_marks_from_records(records: Sequence[dict]) -> List[SpeechMark]:
-    """Convert serialized SpeechMark records to SpeechMark objects."""
+def _speech_marks_from_records(
+    records: Sequence[dict], chunk_text: str
+) -> List[SpeechMark]:
+    """Align Polly speech mark records against the chunk text."""
     marks: List[SpeechMark] = []
+    if not records:
+        return marks
+
+    def _parse_int(value: object) -> int | None:
+        return int(value)  # type: ignore[arg-type]
+
+    search_pos = 0
+    base_slop = 60
+    max_slop = 100
+    slop = base_slop
+    chunk_len = len(chunk_text)
     for rec in records:
-        try:
-            if isinstance(rec, SpeechMark):
-                marks.append(rec)
-            else:
-                marks.append(SpeechMark.model_validate(rec))
-        except (KeyError, ValueError, TypeError):
+        if not isinstance(rec, dict):
+            raise TypeError
+
+        mark_type = rec.get("type") or rec.get("mark_type")
+        word = rec.get("value") or rec.get("text")
+        time_ms = _parse_int(rec.get("time_ms", rec.get("time")))
+
+        if word and (mark_type is None or mark_type == "word") and time_ms is not None:
+            if search_pos >= chunk_len:
+                break
+            search_start = search_pos
+            search_end = min(chunk_len, search_start + slop)
+            idx = chunk_text.find(word, search_start, search_end)
+            if idx == -1:
+                slop = min(max_slop, slop + len(word))
+                continue
+            marks.append(
+                SpeechMark(
+                    time_ms=time_ms,
+                    chunk_char_start=idx,
+                    chunk_char_end=idx + len(word),
+                )
+            )
+            search_pos = idx + len(word)
+            slop = base_slop
             continue
+
     marks.sort(key=lambda m: m.time_ms)
     return marks
 
@@ -207,7 +240,15 @@ class TtsCache:
     def _read_speech_marks(self, meta_path: Path) -> List[SpeechMark]:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         records = meta.get("speech_marks", [])
-        return _speech_marks_from_records(records)
+        marks: List[SpeechMark] = []
+        for rec in records:
+            try:
+                marks.append(SpeechMark.model_validate(rec))
+            except (KeyError, ValueError, TypeError):
+                logging.exception('Error reading marks; invalidating cache for future run')
+                meta_path.unlink()
+                continue
+        return marks
 
     def _handle_future_done(self, key: str, label: str, future: Future) -> None:
         try:
@@ -221,36 +262,17 @@ class TtsCache:
         logging.error("TTS %s synthesis failed for key %s: %s", label, key, exc)
         self._cache.pop(key, None)
 
-    @staticmethod
-    def _byte_to_char_offset(byte_offset: int, cumulative_bytes: List[int]) -> int:
-        import bisect
-
-        idx = bisect.bisect_right(cumulative_bytes, byte_offset) - 1
-        return max(idx, 0)
-
     def _parse_speech_mark_lines(
         self, lines: Iterable[str], chunk_text: str
     ) -> List[SpeechMark]:
-        cumulative_bytes: List[int] = [0]
-        for ch in chunk_text:
-            cumulative_bytes.append(cumulative_bytes[-1] + len(ch.encode("utf-8")))
-
-        marks: List[SpeechMark] = []
+        records: List[dict] = []
         for line in lines:
-            data = json.loads(line)
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
             mark_type = data.get("type")
             if mark_type not in {"word", "sentence"}:
                 continue
-            start_byte = int(data.get("start", 0))
-            end_byte = int(data.get("end", start_byte))
-            chunk_char_start = self._byte_to_char_offset(start_byte, cumulative_bytes)
-            chunk_char_end = self._byte_to_char_offset(end_byte, cumulative_bytes)
-            marks.append(
-                SpeechMark(
-                    time_ms=int(data["time"]),
-                    chunk_char_start=chunk_char_start,
-                    chunk_char_end=chunk_char_end,
-                )
-            )
-        marks.sort(key=lambda mark: mark.time_ms)
-        return marks
+            records.append(data)
+        return _speech_marks_from_records(records, chunk_text)
