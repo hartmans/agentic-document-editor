@@ -14,6 +14,9 @@ import {
   DocumentPlayback,
   DocumentPlaybackHandle,
 } from "./DocumentPlayback";
+import {
+  instructionsSentUrl,
+  play} from "../audio/sounds";
 
 export function DocumentEditor() {
   const [doc, setDoc] = useState<DocumentResponse | null>(null);
@@ -106,6 +109,7 @@ export function DocumentEditor() {
     };
     try {
       setVoiceMode('waiting');
+      void play(instructionsSentUrl);
       const resp = await postInstructions({
         messages,
         instructions: trimmed,
