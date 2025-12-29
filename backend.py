@@ -105,10 +105,12 @@ def _build_document_response(document_state: DocumentState) -> DocumentResponseM
 # ----------------------------- FastAPI app --------------------------------- #
 
 
-def create_app(state: DocumentState, document_id: str) -> FastAPI:
+def create_app(state: DocumentState, document_path: Path) -> FastAPI:
+    document_id = _sha256_text(str(document_path.resolve()))
     app = FastAPI(title="Agentic Document TTS Server")
     app.state.document_state = state
     app.state.document_id = document_id
+    app.state.document_path = document_path
     app.state.documents  = {document_id: state}
     app.state.graph = build_graph()
 
@@ -216,6 +218,8 @@ def create_app(state: DocumentState, document_id: str) -> FastAPI:
                 output_state.position 
             )
         else: updated_resume_point = resume_point
+        if app.state.document_state:
+            app.state.document_path.write_text(app.state.document_state.document)
         return InstructionsResponse(
             messages=messages_to_dict(output_state.messages),
             resumePoint=updated_resume_point,
@@ -347,8 +351,7 @@ def main():
         logging.error("Failed to preprocess document: %s", exc)
         raise SystemExit(1) from exc
 
-    document_id = _sha256_text(str(document_path.resolve()))
-    app = create_app(state, document_id)
+    app = create_app(state, document_path)
     uvicorn.run(app, host=args.host, port=args.port)
 
 
