@@ -7,6 +7,8 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
 import typing
+import sh
+import shlex
 
 import boto3
 from botocore.exceptions import ClientError
@@ -78,7 +80,7 @@ class TtsCache:
     def __init__(
         self,
         config: dict[str, typing.Any],
-        boto_session: boto3.session.Session | None,
+        boto_session: boto3.session.Session | None, # type: ignore
         prefix: str = "",
     ) -> None:
         self.config = config
@@ -87,17 +89,18 @@ class TtsCache:
             self.prefix = f"{self.prefix}_"
         voice_id = self._get_config("voice_id")
         engine = self._get_config("engine")
+        self.filter = self._get_config('filter')
         cache_dir = self._get_config("cache_dir")
         region_name = self._get_config("region_name")
 
-        self.voice_id = voice_id if voice_id is not None else "Joanna"
-        self.engine = engine if engine is not None else "neural"
+        self.voice_id = voice_id if voice_id is not None else "Ruth"
+        self.engine = engine if engine is not None else "long-form"
         cache_dir = cache_dir if cache_dir is not None else ".tts_cache"
         self.region_name = (
             region_name if region_name is not None else "us-east-1"
         )
 
-        self.cache_dir = Path(cache_dir)
+        self.cache_dir = Path(typing.cast(str, cache_dir))
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.session = boto_session or boto3.Session()
         self.client = self.session.client("polly", region_name=self.region_name)
@@ -122,6 +125,13 @@ class TtsCache:
             return
 
         entry: dict[str, object] = {}
+        if self.filter:
+            command, *filter_rest = shlex.split(self.filter)
+            text = str(sh.Command(command)(
+                *filter_rest,
+                _in=text))
+        text = f'<speak>{text}</speak>'
+        
         audio_future = _TTS_EXECUTOR.submit(self._synthesize_audio, text, audio_path)
         entry["audio"] = audio_future
         audio_future.add_done_callback(
@@ -185,23 +195,23 @@ class TtsCache:
         return h.hexdigest()
 
     def _call_polly(self, **kwargs):
-        if self.engine:
             try:
                 return self.client.synthesize_speech(**kwargs, Engine=self.engine)
             except ClientError as exc:
-                logging.warning(
-                    "Polly synthesis failed with engine %s, retrying without engine: %s",
+                logging.error(
+                    "Polly synthesis failed with engine %s: %s",
                     self.engine,
                     exc,
                 )
-                return self.client.synthesize_speech(**kwargs)
-        return self.client.synthesize_speech(**kwargs)
+                breakpoint()
+                raise
 
     def _synthesize_audio(self, text: str, audio_path: Path | None = None) -> bytes:
         audio_response = self._call_polly(
             Text=text,
             VoiceId=self.voice_id,
             OutputFormat="mp3",
+            TextType="ssml",
         )
         audio_stream = audio_response.get("AudioStream")
         if audio_stream is None:
@@ -219,6 +229,7 @@ class TtsCache:
             VoiceId=self.voice_id,
             OutputFormat="json",
             SpeechMarkTypes=["word", "sentence"],
+            TextType="ssml",
         )
         marks_stream = marks_response.get("AudioStream")
         if marks_stream is None:
