@@ -538,35 +538,67 @@ def _add_candidate(
 
 def chunk_documents(document: str) -> List[tuple[int, int]]:
     """
-    Split the document into contiguous spans separated by one or more blank lines.
+    Split the document into contiguous spans, preferring paragraph breaks.
 
-    Returns a list of (start, end) offsets into the original document.
+    Returns a list of (start, end) offsets into the original document. 
     """
     import re
 
+    if document.strip() == "":
+        return []
+
+    min_chunk_size = 1000
+    max_chunk_size = 2000
     separator = re.compile(r"(?:\r?\n\s*){2,}")
+    break_ends = [match.end() for match in separator.finditer(document)]
     spans: List[tuple[int, int]] = []
     cursor = 0
+    break_idx = 0
+    doc_len = len(document)
 
-    for match in separator.finditer(document):
-        start = cursor
-        end = match.start()
-        cursor = match.end()
-        if start == end:
-            continue
-        text = document[start:end]
-        if text.strip() == "":
-            continue
-        spans.append((start, end))
+    while cursor < doc_len:
+        remaining = doc_len - cursor
+        if remaining <= max_chunk_size:
+            spans.append((cursor, doc_len))
+            break
 
-    if cursor < len(document):
-        trailing = document[cursor:]
-        if trailing.strip() != "":
-            spans.append((cursor, len(document)))
+        window_start = cursor + min_chunk_size
+        window_end = min(cursor + max_chunk_size, doc_len)
 
-    # If the document was entirely whitespace or separators, fall back to one chunk.
-    if not spans and document.strip() != "":
-        spans.append((0, len(document)))
+        while break_idx < len(break_ends) and break_ends[break_idx] < window_start:
+            break_idx += 1
+
+        candidate_end = None
+        scan_idx = break_idx
+        while scan_idx < len(break_ends) and break_ends[scan_idx] <= window_end:
+            candidate_end = break_ends[scan_idx]
+            scan_idx += 1
+        break_idx = scan_idx
+
+        if candidate_end is not None:
+            end = candidate_end
+        else:
+            search_start = cursor + max_chunk_size
+            if search_start >= doc_len:
+                end = doc_len
+            else:
+                whitespace_match = re.search(r"\s", document[search_start:])
+                if whitespace_match:
+                    end = search_start + whitespace_match.start()
+                    while end < doc_len and document[end].isspace():
+                        end += 1
+                else:
+                    end = doc_len
+
+        if doc_len - end < min_chunk_size:
+            end = doc_len
+
+        if end <= cursor:
+            end = min(doc_len, cursor + max_chunk_size)
+
+        spans.append((cursor, end))
+        cursor = end
+
     return spans
 
 
