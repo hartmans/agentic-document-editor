@@ -20,6 +20,7 @@ export interface ChunkRef {
 export interface DocumentPlaybackHandle {
   play: (resume?: ResumePoint) => Promise<void>;
   stop: () => ResumePoint;
+  invalidateCache: () => void;
 }
 
 let globalComponentNumber = 0;
@@ -30,7 +31,7 @@ interface Props {
   chunks: ChunkRef[];
   documentId: string;
   onPlayingChange?: (playing: boolean) => void;
-  interruptionPosition?: number | null;
+  onNaturalEnd?: () => void;
   autoPlay?: boolean;
 }
 
@@ -40,7 +41,7 @@ export function DocumentPlayback({
   chunks,
   documentId,
   onPlayingChange,
-  interruptionPosition,
+  onNaturalEnd,
   autoPlay = false,
   ref,
 }: Props & { ref?: Ref<DocumentPlaybackHandle> }) {
@@ -67,10 +68,6 @@ export function DocumentPlayback({
       };
     }, []);
 
-    useEffect(() => {
-      if (interruptionPosition == null) return;
-    }, [interruptionPosition]);
-
     async function loadBuffer(chunkId: number): Promise<AudioBuffer> {
       const cached = buffersRef.current.get(chunkId);
       if (cached) return cached;
@@ -81,10 +78,18 @@ export function DocumentPlayback({
       return buf;
     }
 
+  const invalidateCache = () => {
+buffersRef.current.clear();
+    }
+
     async function startChunk(chunkId: number, offsetMs = 0, docCharPosition?: number | null) {
       if (!audioEngineRef.current || !audioContext) return;
       const buffer = await loadBuffer(chunkId);
-      const chunk = chunks[chunkId];
+        const chunk = chunks[chunkId];
+        if (playingRef.current) {
+            console.error('StartChunk but already playing');
+            return;
+        }
       if (chunk) {
         const startPos =
           docCharPosition != null ? docCharPosition : chunk.doc_char_start;
@@ -92,23 +97,24 @@ export function DocumentPlayback({
       }
       if (!audioEngineRef.current)
         return;
-      audioEngineRef.current.playChunk(chunkId, buffer, offsetMs / 1000, () =>
-        handleNaturalEnd(chunkId)
-      );
+      audioEngineRef.current.playChunk(chunkId, buffer, offsetMs / 1000, () => {
+          playingRef.current = false;
+          handleNaturalEnd(chunkId);
+          
+      });
       playingRef.current = true;
       setCurrentChunkId(chunkId);
       onPlayingChange?.(true);
     }
 
     function handleNaturalEnd(finishedId: number) {
-      if (playingRef.current == false)
-        return;
       const nextId = finishedId + 1;
       if (nextId < chunks.length) {
         startChunk(nextId, 0, chunks[nextId].doc_char_start);
       } else {
         playingRef.current = false;
         onPlayingChange?.(false);
+        onNaturalEnd?.();
       }
     }
 
@@ -136,6 +142,7 @@ export function DocumentPlayback({
         await startChunk(targetChunk, offset, docPos);
       },
       stop: () => stopPlayback(),
+      invalidateCache: invalidateCache,
     }));
 
     useEffect(() => {

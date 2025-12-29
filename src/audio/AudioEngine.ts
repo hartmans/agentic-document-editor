@@ -42,6 +42,7 @@ export class AudioEngine {
   }
 
   stop(): void {
+      this.onEndedCallback = null;
     if (this.sourceNode) {
       try {
         this.sourceNode.stop();

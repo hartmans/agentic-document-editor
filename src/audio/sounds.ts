@@ -1,4 +1,4 @@
-import instructionsSentUrl from "../asets/sounds/instructions_sent.ogg";
+import instructionsSentUrl from "../assets/sounds/instructions_sent.ogg";
 export {instructionsSentUrl};
 
 export function play(url:string): Promise<void>

@@ -120,6 +120,7 @@ export function DocumentEditor() {
       setResponseDocumentId(resp.documentId);
       const responseDocument = await fetchDocument(resp.documentId);
       setResponseDoc(responseDocument);
+      playbackRef.current?.invalidateCache();
       setVoiceMode((prev) => (prev === "waiting" ? "armed" : prev));
     } catch (err) {
       setError((err as Error).message);
@@ -144,6 +145,8 @@ export function DocumentEditor() {
           documentText={responseDoc.document}
           chunks={responseDoc.chunks}
           autoPlay
+          onNaturalEnd={handlePlay}
+          key="response"
           onPlayingChange={(isPlaying) => {
             if (isPlaying) setVoiceMode((prev) => (prev === "idle" ? prev : "armed"));
           }}
@@ -155,6 +158,7 @@ export function DocumentEditor() {
         documentId={documentId}
         documentText={doc.document}
         chunks={doc.chunks}
+        key="original"
         onPlayingChange={(isPlaying) => {
           setPlaying(isPlaying);
           if (isPlaying) setVoiceMode((prev) => (prev === "idle" ? prev : "armed"));
