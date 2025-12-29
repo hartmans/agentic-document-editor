@@ -29,9 +29,9 @@ def replace_text(
     This tool looks for old_text between before and after and replaces it with new_text. The combination of before followed by old_text followed by after must be unique in the document.
 
     Args:
-        before: A string that appears in the document just before the old_text
+        before: A few words from the document just before the old_text
         old_text: Exact text to replace.
-        after: Text the appears unchanged after the text to replace
+        after: A few words just after the modified text
         new_text: Replacement text.
 
     Returns:
@@ -49,7 +49,7 @@ def replace_text(
         'document': updated,
         'position': min(position, result.index),
             'messages': [ToolMessage(
-                content="Document updated. Now describe your change so the user knows what you did.",
+                content="Document updated. Now briefly describe your change so the user knows what you did.",
                 tool_call_id=tool_call_id,
             )],
     })
@@ -69,9 +69,9 @@ def reposition_playback(
     Use this tool if you are asked to reposition to a particular point in the document or asked to play from a given point in the document. Select the position at which the document continues playing back to the author. This should be the last action taken by the LLM; it ends the conversation at least until the author interrupts again.
     Playback resumes at target, a string that must appear in the document between *before* and *after.
     Args:
-        before: Short excerpt of Text before target, only long enough to uniquely identify a position in the document
+        before: Short excerpt of Text before target (a few words)
         target: Start playback immediately before an occurance  of **target* between *before* and *after* in the document.
-        after:  Short excerpt of text appearing after *target*
+        after:  Short excerpt of text appearing after *target* (a few words)
         message: If supplied the final response to the author before playback resumes. If not supplied, playback will resume with no response.
     '''
     document = typing.cast(str, state.document)
