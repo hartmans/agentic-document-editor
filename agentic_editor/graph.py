@@ -120,9 +120,9 @@ async def our_tool_node(state:GraphState, runtime:Runtime) -> Command | typing.S
     default_destination = 'llm_call'
     result = await node.ainvoke(state)
     match result:
-        case Command(goto=dest) | [Command(goto=dest)]:
+        case Command(goto=dest) | [Command(goto=dest)] if dest :
             return result # already includes a destination
-        case Command(update=update) | [Command(update=update)]:
+        case Command(update=update) | [Command(update=update)] if update:
             return Command(goto=default_destination, update=update)
         case Command():
             raise RuntimeError('A command we do not know how to handle; for example Send API')
