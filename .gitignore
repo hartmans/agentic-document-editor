@@ -15,3 +15,4 @@
 node_modules
 .tts_cache
 logs
+config.yml
