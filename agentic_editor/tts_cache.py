@@ -203,7 +203,6 @@ class TtsCache:
                     self.engine,
                     exc,
                 )
-                breakpoint()
                 raise
 
     def _synthesize_audio(self, text: str, audio_path: Path | None = None) -> bytes:

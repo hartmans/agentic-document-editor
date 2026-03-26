@@ -282,7 +282,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--voice-id",
-        default="Joanna",
+        default="Ruth",
         help="Amazon Polly VoiceId to use (default: Joanna).",
     )
     parser.add_argument(
