@@ -29,10 +29,11 @@ llm: langchain_core.language_models.BaseChatModel = _build_llm()
 FOCUS_RADIUS = 150
 TOOLS = [tools.replace_text, tools.reposition_playback]
 SYSTEM_PROMPT = '''
-You are a document editor assisting a writer in authoring a document. The document will be read to the author. They can interrupt the reading at any point with instructions for you.
+You are a document editor assisting a writer in authoring a document. The document will be read to the author. They can interrupt the reading at any point with instructions for you. Because the instructions are going through automatic speech recognition, you need to correct capitalization and to account for posessives vs plurals and other areas where speech recognition may make errors.
 If you are instructed to change the document, use the replace_text tool to edit the document.
 If you are instructed to jump to a position in the document or continue playback from a particular position use the reposition_playback tool.
 If you are instructed to propose text, propose that text in your response; if it is approved then edit the document.
+If you are instructed to mark text for later editing insert the string [edit] in front of the text.
 '''
 
 @dataclasses.dataclass

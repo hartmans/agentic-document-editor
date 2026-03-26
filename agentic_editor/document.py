@@ -20,6 +20,7 @@ class DocumentUpdate:
 class SearchTextConfig:
     radius: int = 400
     context_chars: int = 60
+    min_context_chars: int = 20
     max_candidates: int = 5
 
 
@@ -110,8 +111,6 @@ class DocumentState:
                 document,
                 target,
                 matches if matches else target_indices,
-                before,
-                after,
                 cfg,
                 target_indices,
             )
@@ -194,8 +193,6 @@ def _unique_candidates_for_targets(
     document: str,
     target: str,
     indices: list[int],
-    before_hint: str,
-    after_hint: str,
     cfg: SearchTextConfig,
     target_indices: list[int],
 ) -> list[SearchTextCandidate]:
@@ -206,8 +203,6 @@ def _unique_candidates_for_targets(
             document,
             target,
             idx,
-            before_hint,
-            after_hint,
             cfg,
             target_indices,
         )
@@ -274,8 +269,6 @@ def _build_unique_candidate_for_target(
     document: str,
     target: str,
     target_start: int,
-    before_hint: str,
-    after_hint: str,
     cfg: SearchTextConfig,
     target_indices: list[int],
 ) -> SearchTextCandidate | None:
@@ -283,18 +276,20 @@ def _build_unique_candidate_for_target(
     left_full = document[:target_start]
     right_full = document[target_end:]
 
-    left_len = _initial_before_len(left_full, before_hint, cfg)
-    right_len = _initial_after_len(right_full, after_hint, cfg)
-
-    left_len = min(left_len, len(left_full))
-    right_len = min(right_len, len(right_full))
+    left_len = min(len(left_full), cfg.min_context_chars)
+    right_len = min(len(right_full), cfg.min_context_chars)
 
     left_max = len(left_full)
     right_max = len(right_full)
 
     while True:
-        before_text = left_full[-left_len:] if left_len else ""
-        after_text = right_full[:right_len] if right_len else ""
+        before_text, after_text = _candidate_context(
+            document,
+            target_start,
+            target_end,
+            left_len,
+            right_len,
+        )
         matches = _matching_targets(
             document, target, before_text, after_text, cfg.radius, target_indices
         )
@@ -315,20 +310,39 @@ def _build_unique_candidate_for_target(
             right_len += 1
 
 
-def _initial_before_len(left_full: str, before_hint: str, cfg: SearchTextConfig) -> int:
-    if before_hint:
-        pos = left_full.rfind(before_hint)
-        if pos != -1:
-            return len(left_full) - pos
-    return min(cfg.context_chars, len(left_full))
+def _candidate_context(
+    document: str,
+    target_start: int,
+    target_end: int,
+    left_len: int,
+    right_len: int,
+) -> tuple[str, str]:
+    before_start = max(0, target_start - left_len)
+    after_end = min(len(document), target_end + right_len)
+
+    before_start = _expand_left_to_word_boundary(document, before_start)
+    after_end = _expand_right_to_word_boundary(document, after_end)
+
+    before_text = document[before_start:target_start]
+    after_text = document[target_end:after_end]
+    return before_text, after_text
 
 
-def _initial_after_len(right_full: str, after_hint: str, cfg: SearchTextConfig) -> int:
-    if after_hint:
-        pos = right_full.find(after_hint)
-        if pos != -1:
-            return pos + len(after_hint)
-    return min(cfg.context_chars, len(right_full))
+def _expand_left_to_word_boundary(document: str, start: int) -> int:
+    while start > 0 and _is_word_char(document[start]) and _is_word_char(document[start - 1]):
+        start -= 1
+    return start
+
+
+def _expand_right_to_word_boundary(document: str, end: int) -> int:
+    doc_len = len(document)
+    while end < doc_len and _is_word_char(document[end - 1]) and _is_word_char(document[end]):
+        end += 1
+    return end
+
+
+def _is_word_char(char: str) -> bool:
+    return char.isalnum()
 
 
 def _make_candidate(
@@ -419,8 +433,6 @@ def _candidate_from_before_after(
         document,
         target_text,
         target_start,
-        before,
-        after,
         cfg,
         _find_all(document, target_text),
     )
@@ -453,8 +465,6 @@ def _candidate_from_before_only(
         document,
         target_text,
         target_start,
-        before,
-        after,
         cfg,
         _find_all(document, target_text),
     )
@@ -486,8 +496,6 @@ def _candidate_from_after_only(
         document,
         target_text,
         target_start,
-        before,
-        after,
         cfg,
         _find_all(document, target_text),
     )

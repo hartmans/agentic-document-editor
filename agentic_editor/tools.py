@@ -7,16 +7,15 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import InjectedToolArg, InjectedToolCallId, tool
 from langgraph.types import Command
 from langgraph.prebuilt.tool_node import InjectedState
-
+from pydantic import Field
 from agentic_editor.document import DocumentState
-from agentic_editor.graph import DocumentUpdate
 
-@tool(infer_schema=True)
+@tool(infer_schema=True, parse_docstring=True)
 def replace_text(
-    before: str,
+    before: Annotated[str, Field(max_length=120)],
     old_text: str,
     new_text: str,
-    after: str,
+    after: Annotated[str, Field(max_length=120)],
     *,
     state: Annotated[DocumentState, InjectedState("document_state")],
     context: Annotated[Any, InjectedToolArg] = None,
@@ -31,7 +30,7 @@ def replace_text(
     Args:
         before: A few words from the document just before the old_text
         old_text: Exact text to replace.
-        after: A few words just after the modified text
+        after: A few words just after the modified
         new_text: Replacement text.
 
     Returns:
@@ -54,11 +53,11 @@ def replace_text(
             )],
     })
 
-@tool(infer_schema=True)
+@tool(infer_schema=True, parse_docstring=True)
 def reposition_playback(
-    before: str,
+    before: Annotated[str, Field(max_length=120)],
     target: str,
-    after: str,
+    after: Annotated[str, Field(max_length=120)],
     message: str = "",
     *,
     state: Annotated[DocumentState, InjectedState("document_state")],
@@ -68,6 +67,7 @@ def reposition_playback(
     '''
     Use this tool if you are asked to reposition to a particular point in the document or asked to play from a given point in the document. Select the position at which the document continues playing back to the author. This should be the last action taken by the LLM; it ends the conversation at least until the author interrupts again.
     Playback resumes at target, a string that must appear in the document between *before* and *after.
+    
     Args:
         before: Short excerpt of Text before target (a few words)
         target: Start playback immediately before an occurance  of **target* between *before* and *after* in the document.
