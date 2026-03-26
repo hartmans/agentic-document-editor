@@ -335,6 +335,8 @@ def main():
         config["region_name"] = args.region
     if "cache_dir" not in config:
         config["cache_dir"] = args.cache_dir
+    if "speech_driver" not in config:
+        config["speech_driver"] = "poly"
 
     try:
         document_text = load_document(document_path)

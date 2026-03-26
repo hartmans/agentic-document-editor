@@ -90,10 +90,16 @@ def build_document_state(
 ) -> DocumentState:
     chunk_spans = chunk_documents(document_text)
     if tts_cache is None:
-        session = session or boto3.Session()
         tts_cache = TtsCache(config or {}, session, prefix=prefix)
+        session = typing.cast(
+            boto3.Session | None,
+            getattr(tts_cache, "session", session),
+        )
     else:
-        session = session or getattr(tts_cache, "session", boto3.Session())
+        session = typing.cast(
+            boto3.Session | None,
+            session or getattr(tts_cache, "session", None),
+        )
     chunks: List[TextChunk] = []
     for chunk_id, (start, end) in enumerate(chunk_spans):
         text = document_text[start:end]
