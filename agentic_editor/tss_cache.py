@@ -56,7 +56,10 @@ class AbstractTtsCache(ABC):
         self.voice_id = ""
         self.region_name: str | None = None
         self.session = boto_session
-        self._cache: dict[str, dict[str, object]] = {}
+        self._cache: dict[
+            str,
+            Future[tuple[bytes, List[SpeechMark]]] | tuple[bytes, List[SpeechMark]],
+        ] = {}
 
     def _get_config(self, key: str) -> object | None:
         prefixed_key = f"{self.prefix}{key}" if self.prefix else key
@@ -77,29 +80,18 @@ class AbstractTtsCache(ABC):
             return
 
         synthesis_text = self._prepare_text(text)
-        entry: dict[str, object] = {}
-
-        audio_future = _TTS_EXECUTOR.submit(
-            self._synthesize_audio, text, synthesis_text, audio_path
+        future = _TTS_EXECUTOR.submit(
+            self._synthesize_cache_entry,
+            text,
+            synthesis_text,
+            audio_path,
+            marks_path,
         )
-        entry["audio"] = audio_future
-        audio_future.add_done_callback(
-            lambda fut, cache_key=key: self._handle_future_done(
-                cache_key, "audio", fut
-            )
-        )
-
-        marks_future = _TTS_EXECUTOR.submit(
-            self._synthesize_speech_marks, text, synthesis_text, marks_path
-        )
-        entry["marks"] = marks_future
-        marks_future.add_done_callback(
-            lambda fut, cache_key=key: self._handle_future_done(
-                cache_key, "speech marks", fut
-            )
+        future.add_done_callback(
+            lambda fut, cache_key=key: self._handle_future_done(cache_key, fut)
         )
 
-        self._cache[key] = entry
+        self._cache[key] = future
 
     def __getitem__(self, text: str) -> tuple[bytes, List[SpeechMark]]:
         key = self._key(text)
@@ -117,17 +109,18 @@ class AbstractTtsCache(ABC):
             marks = self._read_speech_marks(marks_path)
             return audio_bytes, marks
 
-        audio_bytes = typing.cast(bytes, self._resolve_cache_entry(entry, "audio"))
-        marks = typing.cast(List[SpeechMark], self._resolve_cache_entry(entry, "marks"))
-        return audio_bytes, marks
+        return self._resolve_cache_entry(key, entry)
 
-    def _resolve_cache_entry(self, entry: dict[str, object], key: str) -> object:
-        value = entry.get(key)
-        if isinstance(value, Future):
-            result = value.result()
-            entry[key] = result
+    def _resolve_cache_entry(
+        self,
+        cache_key: str,
+        entry: Future[tuple[bytes, List[SpeechMark]]] | tuple[bytes, List[SpeechMark]],
+    ) -> tuple[bytes, List[SpeechMark]]:
+        if isinstance(entry, Future):
+            result = entry.result()
+            self._cache[cache_key] = result
             return result
-        return value
+        return entry
 
     def _prepare_text(self, text: str) -> str:
         if self.filter:
@@ -186,36 +179,42 @@ class AbstractTtsCache(ABC):
                 continue
         return marks
 
-    def _handle_future_done(self, key: str, label: str, future: Future) -> None:
+    def _synthesize_cache_entry(
+        self,
+        text: str,
+        synthesis_text: str,
+        audio_path: Path,
+        marks_path: Path,
+    ) -> tuple[bytes, List[SpeechMark]]:
+        audio_bytes, speech_marks = self._synthesize_entry(text, synthesis_text)
+        audio_path.write_bytes(audio_bytes)
+        self._write_speech_marks(marks_path, speech_marks)
+        return audio_bytes, list(speech_marks)
+
+    def _handle_future_done(
+        self,
+        key: str,
+        future: Future[tuple[bytes, List[SpeechMark]]],
+    ) -> None:
         try:
             exc = future.exception()
         except Exception as err:
-            logging.error("TTS %s synthesis crashed for key %s: %s", label, key, err)
+            logging.error("TTS synthesis crashed for key %s: %s", key, err)
             self._cache.pop(key, None)
             return
 
         if exc is None:
             return
 
-        logging.error("TTS %s synthesis failed for key %s: %s", label, key, exc)
+        logging.error("TTS synthesis failed for key %s: %s", key, exc)
         self._cache.pop(key, None)
 
     @abstractmethod
-    def _synthesize_audio(
+    def _synthesize_entry(
         self,
         text: str,
         synthesis_text: str,
-        audio_path: Path | None = None,
-    ) -> bytes:
-        raise NotImplementedError
-
-    @abstractmethod
-    def _synthesize_speech_marks(
-        self,
-        text: str,
-        synthesis_text: str,
-        marks_path: Path | None = None,
-    ) -> List[SpeechMark]:
+    ) -> tuple[bytes, List[SpeechMark]]:
         raise NotImplementedError
 
 

@@ -10,6 +10,7 @@ if (existsSync(".venv")) {
 export default defineConfig({
   plugins: [react()],
   server: {
+    allowedHosts: ["konishi.lan"],
     port: 5173,
     watch: {
       ignored: ignoredWatchPaths,

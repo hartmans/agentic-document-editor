@@ -8,6 +8,7 @@ from agentic_editor.tss_cache import AbstractTtsCache
 _DRIVER_FACTORIES: dict[str, str | type[AbstractTtsCache]] = {
     "poly": "agentic_editor.poly_tts_cache:PollyTtsCache",
     "polly": "agentic_editor.poly_tts_cache:PollyTtsCache",
+    "qwen": "agentic_editor.qwen_tts_cache:QwenTtsCache",
 }
 
 

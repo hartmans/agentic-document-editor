@@ -113,12 +113,11 @@ class PollyTtsCache(AbstractTtsCache):
             )
             raise
 
-    def _synthesize_audio(
+    def _synthesize_entry(
         self,
         text: str,
         synthesis_text: str,
-        audio_path: Path | None = None,
-    ) -> bytes:
+    ) -> tuple[bytes, List[SpeechMark]]:
         audio_response = self._call_polly(
             Text=synthesis_text,
             VoiceId=self.voice_id,
@@ -129,16 +128,6 @@ class PollyTtsCache(AbstractTtsCache):
         if audio_stream is None:
             raise RuntimeError("Polly response missing AudioStream for audio synthesis")
         audio_bytes = audio_stream.read()
-        if audio_path is not None:
-            audio_path.write_bytes(audio_bytes)
-        return audio_bytes
-
-    def _synthesize_speech_marks(
-        self,
-        text: str,
-        synthesis_text: str,
-        marks_path: Path | None = None,
-    ) -> List[SpeechMark]:
         marks_response = self._call_polly(
             Text=synthesis_text,
             VoiceId=self.voice_id,
@@ -152,9 +141,7 @@ class PollyTtsCache(AbstractTtsCache):
         raw = marks_stream.read().decode("utf-8")
         lines = [line for line in raw.splitlines() if line.strip()]
         speech_marks = self._parse_speech_mark_lines(lines, text)
-        if marks_path is not None:
-            self._write_speech_marks(marks_path, speech_marks)
-        return speech_marks
+        return audio_bytes, speech_marks
 
     def _parse_speech_mark_lines(
         self, lines: typing.Iterable[str], chunk_text: str

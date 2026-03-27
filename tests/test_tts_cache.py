@@ -23,23 +23,12 @@ class DummyTtsCache(AbstractTtsCache):
     def _transform_text(self, text: str) -> str:
         return f"prepared:{text}"
 
-    def _synthesize_audio(
+    def _synthesize_entry(
         self,
         text: str,
         synthesis_text: str,
-        audio_path: Path | None = None,
-    ) -> bytes:
+    ) -> tuple[bytes, list[SpeechMark]]:
         audio_bytes = synthesis_text.encode("utf-8")
-        if audio_path is not None:
-            audio_path.write_bytes(audio_bytes)
-        return audio_bytes
-
-    def _synthesize_speech_marks(
-        self,
-        text: str,
-        synthesis_text: str,
-        marks_path: Path | None = None,
-    ) -> list[SpeechMark]:
         marks = [
             SpeechMark(
                 time_ms=0,
@@ -47,9 +36,7 @@ class DummyTtsCache(AbstractTtsCache):
                 chunk_char_end=len(text),
             )
         ]
-        if marks_path is not None:
-            self._write_speech_marks(marks_path, marks)
-        return marks
+        return audio_bytes, marks
 
 
 def test_resolve_tts_cache_class_defaults_to_poly():
