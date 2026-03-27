@@ -9,7 +9,7 @@
 
 ## Build, Test, and Development Commands
 - `yarn dev` starts the Vite dev server for the frontend.
-- Python requires a venv to work; try ~/ai/venv/ as your venv
+- Python requires a venv to work; try .venv in the repo falling back to ~/ai/venv/ as your venv
 - PYTHONPATH needs to include /home/hartmans/stories/ai
 - `python backend.py --document-path path/to/file.txt --port 8000` runs the FastAPI backend (expects a UTF-8 text document).
 - `pytest` runs backend unit tests in `tests/`.
@@ -22,4 +22,4 @@
 
 ## Commit & Pull Request Guidelines
 - If it looks like unrelated changes are uncommitted at the beginning of your work, ask for confirmation.
-- Ask for help when you are ready to commit; do not commit yourself.
+- Ask for help when you are ready to commit; do not commit yourself until you are told to do so.
