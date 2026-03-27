@@ -1,8 +1,23 @@
 -- qwen_filter.lua
 
+local function normalize_punctuation(s)
+  if not s then return "" end
+  s = s:gsub("‘", "'")
+  s = s:gsub("’", "'")
+  s = s:gsub("‚", "'")
+  s = s:gsub("‛", "'")
+  s = s:gsub("“", "\"")
+  s = s:gsub("”", "\"")
+  s = s:gsub("„", "\"")
+  s = s:gsub("‟", "\"")
+  s = s:gsub("—", "---")
+  return s
+end
+
 -- Escape XML-sensitive characters in text nodes
 local function escape_xml(s)
   if not s then return "" end
+  s = normalize_punctuation(s)
   s = s:gsub("&", "&amp;")
   s = s:gsub("<", "«")
   s = s:gsub(">", "»")
