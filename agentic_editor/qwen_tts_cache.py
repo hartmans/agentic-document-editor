@@ -60,6 +60,7 @@ class QwenTtsCache(AbstractTtsCache):
         whisperx_language = self._get_config("whisperx_language")
         prompt_cache_dir = self._get_config("prompt_cache_dir")
         ref_text = self._get_config("ref_text")
+        temperature = self._get_config("temperature")
         x_vector_only_mode = self._get_config("x_vector_only_mode")
 
         self.voice_id = str(voice_id) if voice_id is not None else self.voice_sample.stem
@@ -79,6 +80,7 @@ class QwenTtsCache(AbstractTtsCache):
             str(whisperx_language) if whisperx_language is not None else _WHISPERX_LANGUAGE
         )
         self.ref_text = str(ref_text) if ref_text is not None else None
+        self.temperature = float(temperature) if temperature is not None else None
         self.x_vector_only_mode = (
             bool(x_vector_only_mode) if x_vector_only_mode is not None else False
         )
@@ -107,6 +109,7 @@ class QwenTtsCache(AbstractTtsCache):
             self._voice_sample_cache_key(),
             str(self.language),
             str(self.ref_text or ""),
+            str(self.temperature if self.temperature is not None else ""),
             str(self.x_vector_only_mode),
             str(self.filter or ""),
             text,
@@ -156,11 +159,15 @@ class QwenTtsCache(AbstractTtsCache):
         prompt_items: Sequence[object],
     ) -> tuple[np.ndarray, int]:
         model = self._ensure_loaded()
+        generation_kwargs: dict[str, Any] = {}
+        if self.temperature is not None:
+            generation_kwargs["temperature"] = self.temperature
         wavs, sample_rate = model.generate_voice_clone(
             text=[text],
             language=[self.language],
             voice_clone_prompt=list(prompt_items),
             non_streaming_mode=True,
+            **generation_kwargs,
         )
         if not wavs:
             raise RuntimeError("Qwen returned no audio")
