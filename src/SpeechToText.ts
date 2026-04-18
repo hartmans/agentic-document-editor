@@ -2,7 +2,7 @@ import {
   TranscribeStreamingClient,
   StartStreamTranscriptionCommand,
 } from "@aws-sdk/client-transcribe-streaming";
-import { fetchSttToken } from "./api";
+import { fetchAsrConfig, type AsrConfigResponse, type SttToken } from "./api";
 
 export interface SpeechToTextProps {
   sampleRate: number;
@@ -12,53 +12,64 @@ export interface SpeechToTextProps {
   onStop: () => void;
 }
 
-/**
- * SpeechToText manages a single Transcribe Streaming session.
- * It consumes Float32 frames provided by the parent via queue_chunk and
- * streams them to AWS Transcribe. onStop is fired at most once when the
- * session ends naturally or due to error. Parent-initiated close() will not
- * call onStop.
- */
-export class SpeechToText {
-  private props: SpeechToTextProps;
+export type AwsAsrConfig = {
+  type: "aws";
+  region: string;
+  stsToken: SttToken;
+};
+
+export type Gemma4AsrConfig = {
+  type: "gemma4";
+};
+
+export type AsrConfig = AwsAsrConfig | Gemma4AsrConfig;
+
+type QueuedFloatChunk = { data: Float32Array; isPreroll: boolean };
+
+export abstract class BaseSpeechToText {
+  protected readonly props: SpeechToTextProps;
+  protected readonly abortController = new AbortController();
+  protected readonly targetSampleRate = 16000;
+  protected readonly inputGain = 2.0;
+
   private silenceTimer: ReturnType<typeof setInterval> | null = null;
   private stopped = false;
   private closedByParent = false;
-  private abortController = new AbortController();
   private lastTranscript: number | null = null;
   private readonly sessionStart = Date.now();
-  private queue: { data: Float32Array; isPreroll: boolean }[] = [];
-  private queueBytes = 0; // in samples *4 (Float32)
-  private pendingResolve: (() => void) | null = null;
   private readonly maxQueuedSamples: number;
-
   private readonly resampler: StatefulResampler;
-  private readonly INPUT_GAIN = 2.0;
 
-  constructor(props: SpeechToTextProps) {
+  private queue: QueuedFloatChunk[] = [];
+  private queueSamples = 0;
+  private pendingResolve: (() => void) | null = null;
+
+  protected constructor(props: SpeechToTextProps) {
     this.props = props;
-    this.resampler = new StatefulResampler(props.sampleRate, 16000);
-    this.maxQueuedSamples = Math.floor(props.sampleRate * 5); // 5s safety cap
+    this.resampler = new StatefulResampler(props.sampleRate, this.targetSampleRate);
+    this.maxQueuedSamples = Math.floor(props.sampleRate * 5);
+  }
+
+  protected startSession() {
     void this.start();
   }
 
-  /** Enqueue captured audio (Float32, source sampleRate). */
   queue_chunk(chunk: Float32Array, isPreroll = false) {
+    this.queueChunk(chunk, isPreroll);
+  }
+
+  queueChunk(chunk: Float32Array, isPreroll = false) {
     if (this.stopped || this.closedByParent) return;
     this.queue.push({ data: chunk, isPreroll });
-    this.queueBytes += chunk.length;
-    if (this.queueBytes > this.maxQueuedSamples) {
+    this.queueSamples += chunk.length;
+    if (this.queueSamples > this.maxQueuedSamples) {
       console.error("STT queue overflow (>5s); aborting session");
       this.abortController.abort();
       return;
     }
-    if (this.pendingResolve) {
-      this.pendingResolve();
-      this.pendingResolve = null;
-    }
+    this.wakeIterator();
   }
 
-  /** Called by parent to terminate without firing onStop. */
   close() {
     this.closedByParent = true;
     this.abortController.abort();
@@ -66,59 +77,60 @@ export class SpeechToText {
     this.wakeIterator();
   }
 
+  protected emitFinal(text: string) {
+    if (!this.closedByParent && !this.stopped && text) {
+      this.props.onFinal(text);
+    }
+  }
+
+  protected markTranscriptActivity() {
+    this.lastTranscript = Date.now();
+  }
+
+  protected isClosedByParent(): boolean {
+    return this.closedByParent;
+  }
+
+  protected abstract startTransport(signal: AbortSignal): Promise<void>;
+  protected abstract handlePcmChunk(chunk: Uint8Array, isPreroll: boolean): Promise<void> | void;
+  protected abstract finishTransport(): Promise<void> | void;
+
   private async start() {
+    let transportPromise: Promise<void> | null = null;
     try {
-      const token = await fetchSttToken();
-      const client = new TranscribeStreamingClient({
-        region: "us-east-1",
-        credentials: {
-          accessKeyId: token.access_key_id,
-          secretAccessKey: token.secret_access_key,
-          sessionToken: token.session_token,
-        },
+      this.abortController.signal.addEventListener("abort", () => {
+        this.wakeIterator();
       });
-
-      const audioIterator = this.pcmAudioIterator(this.abortController.signal);
-
+      transportPromise = this.startTransport(this.abortController.signal);
       this.startIdleTimers();
 
-      const command = new StartStreamTranscriptionCommand({
-        LanguageCode: "en-US",
-        MediaEncoding: "pcm",
-        MediaSampleRateHertz: 16000,
-        AudioStream: audioIterator,
-      });
-
-      const response = await client.send(command);
-      console.log("STT Started", { t: Date.now() });
-      try {
-        for await (const evt of response.TranscriptResultStream ?? []) {
-          const results = evt?.TranscriptEvent?.Transcript?.Results;
-          console.log("TranscriptEvent", {
-            t: Date.now(),
-            resultsLen: results?.length ?? 0,
-          });
-          if (!results) continue;
-          for (const res of results) {
-            const text = res.Alternatives?.[0]?.Transcript ?? "";
-            if (!text) continue;
-            this.lastTranscript = Date.now();
-            if (!res.IsPartial) {
-              this.props.onFinal(text);
-            }
-          }
-        }
-      } catch (streamErr) {
-        console.error("STT stream error", streamErr);
+      while (!this.stopped && !this.closedByParent && !this.abortController.signal.aborted) {
+        const next = await this.dequeue();
+        if (!next) continue;
+        const pcm = this.normalizeChunk(next.data);
+        if (pcm.byteLength === 0) continue;
+        await this.handlePcmChunk(pcm, next.isPreroll);
       }
-      console.log("STT stream ended", {
-        t: Date.now(),
-        metadata: response?.$metadata,
-      });
     } catch (err) {
-      console.error("STT failed", err);
+      if (!this.closedByParent) {
+        console.error("STT failed", err);
+      }
     } finally {
       this.cleanupTimers();
+      try {
+        await this.finishTransport();
+      } catch (err) {
+        if (!this.closedByParent) {
+          console.error("STT finish failed", err);
+        }
+      }
+      try {
+        await transportPromise;
+      } catch (err) {
+        if (!this.closedByParent) {
+          console.error("STT transport failed", err);
+        }
+      }
       if (!this.stopped && !this.closedByParent) {
         this.stopped = true;
         this.props.onStop();
@@ -128,7 +140,6 @@ export class SpeechToText {
 
   private startIdleTimers() {
     this.cleanupTimers();
-    // Evaluate both hard (10s since last transcript) and soft (4s since last transcript & below VAD)
     this.silenceTimer = setInterval(() => this.handleIdle(), 500);
   }
 
@@ -137,12 +148,10 @@ export class SpeechToText {
     const now = Date.now();
     const last = this.lastTranscript ?? this.sessionStart;
     const idleMs = now - last;
-    // Hard cap: 10s without any new transcript results.
     if (idleMs >= 10000) {
       this.abortController.abort();
       return;
     }
-    // Soft cap: after at least one transcript, 4s idle AND below VAD threshold.
     if (this.lastTranscript && idleMs >= 4000 && this.props.getRms() < this.props.vadThreshold) {
       this.abortController.abort();
     }
@@ -153,24 +162,6 @@ export class SpeechToText {
     this.silenceTimer = null;
   }
 
-  private async *pcmAudioIterator(signal: AbortSignal) {
-    signal.addEventListener("abort", () => {
-      this.wakeIterator();
-    });
-
-    try {
-      while (!this.stopped && !this.closedByParent && !signal.aborted) {
-        const next = await this.dequeue();
-        if (!next) continue;
-        const boosted = applyGain(next.data, this.INPUT_GAIN);
-        const resampled = this.resampler.process(boosted);
-        const pcm = floatTo16BitPCM(resampled);
-        yield { AudioEvent: { AudioChunk: pcm } };
-      }
-    } finally {
-    }
-  }
-
   private wakeIterator() {
     if (this.pendingResolve) {
       this.pendingResolve();
@@ -178,10 +169,10 @@ export class SpeechToText {
     }
   }
 
-  private dequeue(): Promise<{ data: Float32Array; isPreroll: boolean } | null> {
+  private dequeue(): Promise<QueuedFloatChunk | null> {
     if (this.queue.length) {
       const item = this.queue.shift()!;
-      this.queueBytes -= item.data.length;
+      this.queueSamples -= item.data.length;
       return Promise.resolve(item);
     }
     if (this.stopped || this.closedByParent || this.abortController.signal.aborted) {
@@ -191,6 +182,323 @@ export class SpeechToText {
       this.pendingResolve = () => resolve(this.dequeue());
     });
   }
+
+  private normalizeChunk(input: Float32Array): Uint8Array {
+    const boosted = applyGain(input, this.inputGain);
+    const resampled = this.resampler.process(boosted);
+    return floatTo16BitPCM(resampled);
+  }
+}
+
+export class AwsSpeechToText extends BaseSpeechToText {
+  private readonly config: AwsAsrConfig;
+  private client: TranscribeStreamingClient | null = null;
+  private pcmQueue: Uint8Array[] = [];
+  private pendingPcmResolve: (() => void) | null = null;
+  private transportClosed = false;
+
+  constructor(config: AwsAsrConfig, props: SpeechToTextProps) {
+    super(props);
+    this.config = config;
+    this.startSession();
+  }
+
+  protected async startTransport(_signal: AbortSignal): Promise<void> {
+    this.client = new TranscribeStreamingClient({
+      region: this.config.region,
+      credentials: {
+        accessKeyId: this.config.stsToken.access_key_id,
+        secretAccessKey: this.config.stsToken.secret_access_key,
+        sessionToken: this.config.stsToken.session_token,
+      },
+    });
+
+    const command = new StartStreamTranscriptionCommand({
+      LanguageCode: "en-US",
+      MediaEncoding: "pcm",
+      MediaSampleRateHertz: this.targetSampleRate,
+      AudioStream: this.pcmAudioIterator(),
+    });
+
+    try {
+      const response = await this.client.send(command);
+      for await (const evt of response.TranscriptResultStream ?? []) {
+        const results = evt?.TranscriptEvent?.Transcript?.Results;
+        if (!results) continue;
+        for (const res of results) {
+          const text = res.Alternatives?.[0]?.Transcript ?? "";
+          if (!text) continue;
+          this.markTranscriptActivity();
+          if (!res.IsPartial) {
+            this.emitFinal(text);
+          }
+        }
+      }
+    } catch (streamErr) {
+      if (!this.isClosedByParent()) {
+        console.error("AWS STT stream error", streamErr);
+      }
+    } finally {
+      this.client?.destroy();
+      this.client = null;
+    }
+  }
+
+  protected handlePcmChunk(chunk: Uint8Array): void {
+    this.pcmQueue.push(chunk);
+    if (this.pendingPcmResolve) {
+      this.pendingPcmResolve();
+      this.pendingPcmResolve = null;
+    }
+  }
+
+  protected async finishTransport(): Promise<void> {
+    this.transportClosed = true;
+    if (this.pendingPcmResolve) {
+      this.pendingPcmResolve();
+      this.pendingPcmResolve = null;
+    }
+  }
+
+  private async *pcmAudioIterator() {
+    while (true) {
+      const next = await this.dequeuePcm();
+      if (!next) return;
+      yield { AudioEvent: { AudioChunk: next } };
+    }
+  }
+
+  private dequeuePcm(): Promise<Uint8Array | null> {
+    if (this.pcmQueue.length) {
+      return Promise.resolve(this.pcmQueue.shift() ?? null);
+    }
+    if (this.transportClosed) {
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve) => {
+      this.pendingPcmResolve = () => resolve(this.dequeuePcm());
+    });
+  }
+}
+
+export class Gemma4SpeechToText extends BaseSpeechToText {
+  private socket: WebSocket | null = null;
+  private openPromise: Promise<void> | null = null;
+  private completionPromise: Promise<void> | null = null;
+  private resolveCompletion: (() => void) | null = null;
+  private rejectCompletion: ((err: unknown) => void) | null = null;
+  private endSent = false;
+  private resultReceived = false;
+
+  constructor(config: Gemma4AsrConfig, props: SpeechToTextProps) {
+    super(props);
+    void config;
+    this.startSession();
+  }
+
+  protected startTransport(_signal: AbortSignal): Promise<void> {
+    const url = buildGemma4WebSocketUrl();
+    this.socket = new WebSocket(url);
+    this.socket.binaryType = "arraybuffer";
+
+    this.openPromise = new Promise((resolve, reject) => {
+      if (!this.socket) {
+        reject(new Error("Gemma4 websocket was not created"));
+        return;
+      }
+      this.socket.addEventListener("open", () => {
+        this.socket?.send(JSON.stringify({ type: "start" }));
+        resolve();
+      });
+      this.socket.addEventListener("error", () => {
+        reject(new Error("Gemma4 websocket failed to open"));
+      });
+    });
+
+    this.completionPromise = new Promise((resolve, reject) => {
+      this.resolveCompletion = resolve;
+      this.rejectCompletion = reject;
+    });
+
+    this.socket.addEventListener("message", (event) => {
+      if (typeof event.data !== "string") {
+        return;
+      }
+      const payload = JSON.parse(event.data) as
+        | { type: "started" }
+        | { type: "result"; instructions: string }
+        | { type: "error"; detail?: string };
+
+      if (payload.type === "started") {
+        return;
+      }
+      if (payload.type === "result") {
+        this.resultReceived = true;
+        this.markTranscriptActivity();
+        this.emitFinal(payload.instructions);
+        this.resolveCompletion?.();
+        this.resolveCompletion = null;
+        this.rejectCompletion = null;
+        this.socket?.close();
+        return;
+      }
+      this.rejectCompletion?.(new Error(payload.detail || "Gemma4 websocket error"));
+      this.resolveCompletion = null;
+      this.rejectCompletion = null;
+      this.socket?.close();
+    });
+
+    this.socket.addEventListener("close", () => {
+      if (this.resolveCompletion === null && this.rejectCompletion === null) {
+        return;
+      }
+      if (this.isClosedByParent() || this.resultReceived) {
+        this.resolveCompletion?.();
+      } else {
+        this.rejectCompletion?.(new Error("Gemma4 websocket closed before result"));
+      }
+      this.resolveCompletion = null;
+      this.rejectCompletion = null;
+    });
+
+    this.socket.addEventListener("error", () => {
+      if (this.rejectCompletion) {
+        this.rejectCompletion(new Error("Gemma4 websocket transport error"));
+        this.resolveCompletion = null;
+        this.rejectCompletion = null;
+      }
+    });
+
+    return this.completionPromise;
+  }
+
+  protected async handlePcmChunk(chunk: Uint8Array): Promise<void> {
+    await this.openPromise;
+    this.socket?.send(chunk);
+  }
+
+  protected async finishTransport(): Promise<void> {
+    const socket = this.socket;
+    if (!socket) return;
+
+    try {
+      await this.openPromise;
+    } catch {
+      socket.close();
+      return;
+    }
+
+    if (this.isClosedByParent()) {
+      socket.close();
+      return;
+    }
+
+    if (!this.endSent && socket.readyState === WebSocket.OPEN) {
+      this.endSent = true;
+      socket.send(JSON.stringify({ type: "end" }));
+    }
+  }
+}
+
+export function createSpeechToText(
+  config: AsrConfig,
+  props: SpeechToTextProps,
+): BaseSpeechToText {
+  switch (config.type) {
+    case "aws":
+      return new AwsSpeechToText(config, props);
+    case "gemma4":
+      return new Gemma4SpeechToText(config, props);
+  }
+}
+
+export async function createSpeechToTextFromBackend(
+  props: SpeechToTextProps,
+): Promise<BaseSpeechToText> {
+  const config = await fetchAsrConfig();
+  return createSpeechToText(asrConfigFromResponse(config), props);
+}
+
+/**
+ * Compatibility wrapper for the current frontend, which still constructs
+ * `new SpeechToText(props)` directly. Once the rest of the app is refactored,
+ * call `createSpeechToText` with an explicit `AsrConfig` instead.
+ */
+export class SpeechToText {
+  private impl: BaseSpeechToText | null = null;
+  private pendingChunks: QueuedFloatChunk[] = [];
+  private closed = false;
+
+  constructor(private readonly props: SpeechToTextProps) {
+    void this.initialize();
+  }
+
+  queue_chunk(chunk: Float32Array, isPreroll = false) {
+    if (this.closed) return;
+    if (!this.impl) {
+      this.pendingChunks.push({ data: chunk, isPreroll });
+      return;
+    }
+    this.impl.queue_chunk(chunk, isPreroll);
+  }
+
+  close() {
+    this.closed = true;
+    this.pendingChunks = [];
+    this.impl?.close();
+    this.impl = null;
+  }
+
+  private async initialize() {
+    try {
+      const impl = await createSpeechToTextFromBackend(this.props);
+      if (this.closed) {
+        impl.close();
+        return;
+      }
+      this.impl = impl;
+      for (const chunk of this.pendingChunks) {
+        this.impl.queue_chunk(chunk.data, chunk.isPreroll);
+      }
+      this.pendingChunks = [];
+    } catch (err) {
+      if (!this.closed) {
+        console.error("Failed to initialize SpeechToText", err);
+        this.props.onStop();
+      }
+    }
+  }
+}
+
+function buildGemma4WebSocketUrl(): string {
+  const rawBase = import.meta.env.VITE_API_BASE as string | undefined;
+  if (rawBase && rawBase.trim()) {
+    const base = rawBase.trim().replace(/\/+$/, "");
+    if (base.startsWith("https://")) {
+      return `${base.replace(/^https:\/\//, "wss://")}/ws/asr`;
+    }
+    if (base.startsWith("http://")) {
+      return `${base.replace(/^http:\/\//, "ws://")}/ws/asr`;
+    }
+    if (base.startsWith("wss://") || base.startsWith("ws://")) {
+      return `${base}/ws/asr`;
+    }
+  }
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}/ws/asr`;
+}
+
+function asrConfigFromResponse(config: AsrConfigResponse): AsrConfig {
+  switch (config.type) {
+    case "aws":
+      return {
+        type: "aws",
+        region: config.region,
+        stsToken: config.stsToken as SttToken,
+      };
+    case "gemma4":
+      return { type: "gemma4" };
+  }
 }
 
 function floatTo16BitPCM(input: Float32Array): Uint8Array {
@@ -198,19 +506,15 @@ function floatTo16BitPCM(input: Float32Array): Uint8Array {
   const view = new DataView(buffer);
   let offset = 0;
   for (let i = 0; i < input.length; i++, offset += 2) {
-    let s = Math.max(-1, Math.min(1, input[i]));
-    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    const sample = Math.max(-1, Math.min(1, input[i]));
+    view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
   }
   return new Uint8Array(buffer);
 }
 
-/**
- * Stateful linear resampler that preserves fractional phase across calls,
- * eliminating dropped/duplicated samples at buffer boundaries.
- */
 class StatefulResampler {
   private readonly ratio: number;
-  private phase = 0; // fractional source index carried across buffers
+  private phase = 0;
   private lastSample = 0;
 
   constructor(private readonly sourceRate: number, private readonly targetRate: number) {
@@ -223,8 +527,6 @@ class StatefulResampler {
 
     const out: number[] = [];
     let pos = this.phase;
-
-    // To support interpolation at the very start, use lastSample from prior buffer if needed.
     const firstSample = pos < 1 ? this.lastSample : input[0];
 
     while (pos < input.length) {
@@ -232,12 +534,10 @@ class StatefulResampler {
       const frac = pos - i;
       const s0 = i >= 0 ? (i === 0 ? firstSample : input[i]) : firstSample;
       const s1 = i + 1 < input.length ? input[i + 1] : input[input.length - 1];
-      const sample = s0 + (s1 - s0) * frac;
-      out.push(sample);
+      out.push(s0 + (s1 - s0) * frac);
       pos += this.ratio;
     }
 
-    // Carry fractional position and last sample forward for continuity.
     this.phase = pos - input.length;
     this.lastSample = input[input.length - 1];
     return new Float32Array(out);

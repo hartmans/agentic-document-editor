@@ -8,13 +8,12 @@ from pathlib import Path
 from threading import Lock, RLock
 from typing import Any, List, Sequence
 
-import boto3
 import numpy as np
 import soundfile as sf
 import torch
 import whisperx
 
-from agentic_editor.poly_tts_cache import _speech_marks_from_records
+from agentic_editor.speech_mark_alignment import speech_marks_from_records
 from agentic_editor.speech_marks import SpeechMark
 from agentic_editor.tss_cache import AbstractTtsCache
 
@@ -40,7 +39,7 @@ class QwenTtsCache(AbstractTtsCache):
     def __init__(
         self,
         config: dict[str, Any],
-        boto_session: boto3.session.Session | None,
+        boto_session: object | None,
         prefix: str = "",
     ) -> None:
         super().__init__(config, boto_session, prefix=prefix)
@@ -64,8 +63,8 @@ class QwenTtsCache(AbstractTtsCache):
         x_vector_only_mode = self._get_config("x_vector_only_mode")
 
         self.voice_id = str(voice_id) if voice_id is not None else self.voice_sample.stem
-        self.region_name = str(region_name) if region_name is not None else "us-east-1"
-        self.session = boto_session or boto3.Session()
+        self.region_name = str(region_name) if region_name is not None else None
+        self.session = boto_session
 
         self.model_name = str(model_name) if model_name is not None else _QWEN_MODEL_NAME
         self.language = str(language) if language is not None else _QWEN_LANGUAGE
@@ -231,7 +230,7 @@ class QwenTtsCache(AbstractTtsCache):
                     "time_ms": int(round(float(start) * 1000)),
                 }
             )
-        return _speech_marks_from_records(records, text)
+        return speech_marks_from_records(records, text)
 
     def _serialize_prompt_items(self, prompt_items: Sequence[object]) -> list[dict[str, Any]]:
         payload: list[dict[str, Any]] = []

@@ -4,8 +4,6 @@ import logging
 from typing import List
 import typing
 
-import boto3
-
 from agentic_editor.document import DocumentState, ResumePoint, TextChunk, chunk_documents
 from agentic_editor.tts_cache import TtsCache
 
@@ -83,7 +81,7 @@ def build_document_state(
     document_text: str,
     *,
     tts_cache: TtsCache | None = None,
-    session: boto3.Session | None = None,
+    session: object | None = None,
     config: dict[str, typing.Any] | None = None,
     prefix: str = "",
     position_hint: int | None = None,
@@ -92,12 +90,12 @@ def build_document_state(
     if tts_cache is None:
         tts_cache = TtsCache(config or {}, session, prefix=prefix)
         session = typing.cast(
-            boto3.Session | None,
+            object | None,
             getattr(tts_cache, "session", session),
         )
     else:
         session = typing.cast(
-            boto3.Session | None,
+            object | None,
             session or getattr(tts_cache, "session", None),
         )
     chunks: List[TextChunk] = []

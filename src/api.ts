@@ -53,6 +53,16 @@ export interface SttToken {
   expiration: string;
 }
 
+export type AsrConfigResponse =
+  | {
+      type: "aws";
+      region: string;
+      stsToken: SttToken;
+    }
+  | {
+      type: "gemma4";
+    };
+
 export interface InstructionsRequest {
   messages: MessageDict[];
   instructions: string;
@@ -104,8 +114,8 @@ export async function postInterruption(
   return handleJson(res);
 }
 
-export async function fetchSttToken(): Promise<SttToken> {
-  return handleJson(await fetch(join(API_BASE, "/stt_token")));
+export async function fetchAsrConfig(): Promise<AsrConfigResponse> {
+  return handleJson(await fetch(join(API_BASE, "/asr")));
 }
 
 export async function postInstructions(

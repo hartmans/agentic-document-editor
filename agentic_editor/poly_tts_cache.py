@@ -9,55 +9,9 @@ import typing
 import boto3
 from botocore.exceptions import ClientError
 
+from agentic_editor.speech_mark_alignment import speech_marks_from_records
 from agentic_editor.speech_marks import SpeechMark
 from agentic_editor.tss_cache import AbstractTtsCache
-
-
-def _speech_marks_from_records(
-    records: Sequence[dict], chunk_text: str
-) -> List[SpeechMark]:
-    """Align Polly speech mark records against the chunk text."""
-    marks: List[SpeechMark] = []
-    if not records:
-        return marks
-
-    def _parse_int(value: object) -> int | None:
-        return int(value)  # type: ignore[arg-type]
-
-    search_pos = 0
-    base_slop = 60
-    max_slop = 100
-    slop = base_slop
-    chunk_len = len(chunk_text)
-    for rec in records:
-        if not isinstance(rec, dict):
-            raise TypeError
-
-        mark_type = rec.get("type") or rec.get("mark_type")
-        word = rec.get("value") or rec.get("text")
-        time_ms = _parse_int(rec.get("time_ms", rec.get("time")))
-
-        if word and (mark_type is None or mark_type == "word") and time_ms is not None:
-            if search_pos >= chunk_len:
-                break
-            search_start = search_pos
-            search_end = min(chunk_len, search_start + slop)
-            idx = chunk_text.find(word, search_start, search_end)
-            if idx == -1:
-                slop = min(max_slop, slop + len(word))
-                continue
-            marks.append(
-                SpeechMark(
-                    time_ms=time_ms,
-                    chunk_char_start=idx,
-                    chunk_char_end=idx + len(word),
-                )
-            )
-            search_pos = idx + len(word)
-            slop = base_slop
-
-    marks.sort(key=lambda mark: mark.time_ms)
-    return marks
 
 
 class PollyTtsCache(AbstractTtsCache):
@@ -156,7 +110,7 @@ class PollyTtsCache(AbstractTtsCache):
             if mark_type not in {"word", "sentence"}:
                 continue
             records.append(data)
-        return _speech_marks_from_records(records, chunk_text)
+        return speech_marks_from_records(records, chunk_text)
 
 
 __all__ = ["PollyTtsCache"]

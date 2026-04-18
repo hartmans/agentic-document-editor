@@ -11,7 +11,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Literal
 import typing
 
 from agentic_editor.document import (
@@ -26,8 +26,8 @@ from agentic_editor.tts import (
     map_doc_char_to_offset,
     map_elapsed_time_to_document,
 )
-from botocore.exceptions import ClientError
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from langchain_core.messages import (
@@ -75,11 +75,24 @@ class InstructionsResponse(BaseModel):
     documentId: str
 
 
-class StsTokenResponse(BaseModel):
+class AwsStsTokenResponse(BaseModel):
     access_key_id: str
     secret_access_key: str
     session_token: str
     expiration: str
+
+
+class AwsAsrResponse(BaseModel):
+    type: Literal["aws"]
+    region: str
+    stsToken: AwsStsTokenResponse
+
+
+class Gemma4AsrResponse(BaseModel):
+    type: Literal["gemma4"]
+
+
+AsrResponse = AwsAsrResponse | Gemma4AsrResponse
 
 
 def _sha256_text(text: str) -> str:
@@ -102,10 +115,70 @@ def _build_document_response(document_state: DocumentState) -> DocumentResponseM
     )
 
 
+def _resolve_asr_type(config: dict[str, typing.Any]) -> Literal["aws", "gemma4"]:
+    region_name = config.get("region_name")
+    if region_name:
+        return "aws"
+    return "gemma4"
+
+
+def _build_aws_asr_response(
+    state: DocumentState,
+    region_name: str,
+) -> AwsAsrResponse:
+    session = state.aws_session
+    if session is None:
+        import boto3
+
+        session = boto3.Session()
+    client = session.client("sts", region_name=region_name)
+    policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": [
+                    "transcribe:StartStreamTranscription",
+                    "transcribe:StartStreamTranscriptionWebSocket",
+                    "transcribe:StartTranscriptionJob",
+                    "transcribe:GetTranscriptionJob",
+                ],
+                "Resource": "*",
+            }
+        ],
+    }
+    resp = client.get_federation_token(
+        Name="agentic-editor-stt",
+        Policy=json.dumps(policy),
+        DurationSeconds=900,
+    )
+    creds = resp.get("Credentials")
+    if not creds:
+        raise HTTPException(status_code=500, detail="Invalid STS response")
+    return AwsAsrResponse(
+        type="aws",
+        region=region_name,
+        stsToken=AwsStsTokenResponse(
+            access_key_id=creds["AccessKeyId"],
+            secret_access_key=creds["SecretAccessKey"],
+            session_token=creds["SessionToken"],
+            expiration=creds["Expiration"].isoformat()
+            if hasattr(creds["Expiration"], "isoformat")
+            else str(creds["Expiration"]),
+        ),
+    )
+
+
 # ----------------------------- FastAPI app --------------------------------- #
 
 
-def create_app(state: DocumentState, document_path: Path) -> FastAPI:
+def create_app(
+    state: DocumentState,
+    document_path: Path,
+    *,
+    config: dict[str, typing.Any],
+    asr_receiver: object | None = None,
+) -> FastAPI:
     document_id = _sha256_text(str(document_path.resolve()))
     app = FastAPI(title="Agentic Document TTS Server")
     app.state.document_state = state
@@ -113,6 +186,10 @@ def create_app(state: DocumentState, document_path: Path) -> FastAPI:
     app.state.document_path = document_path
     app.state.documents  = {document_id: state}
     app.state.graph = build_graph()
+    app.state.asr_type = _resolve_asr_type(config)
+    app.state.asr_region_name = str(config["region_name"]) if config.get("region_name") else None
+    app.state.asr_receiver = asr_receiver
+    app.state.asr_config = dict(config)
 
     app.add_middleware(
         CORSMiddleware,
@@ -134,6 +211,21 @@ def create_app(state: DocumentState, document_path: Path) -> FastAPI:
             "chunkingStrategy": "paragraph",
             "document": document_response,
         }
+
+    @app.get("/asr", response_model=AsrResponse)
+    def get_asr():
+        if app.state.asr_type == "aws":
+            region_name = app.state.asr_region_name
+            if not region_name:
+                raise HTTPException(status_code=500, detail="AWS ASR region not configured")
+            try:
+                return _build_aws_asr_response(app.state.document_state, region_name)
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logging.error("Failed to obtain AWS ASR config: %s", exc)
+                raise HTTPException(status_code=500, detail="Failed to obtain AWS ASR config")
+        return Gemma4AsrResponse(type="gemma4")
 
     @app.get("/document/{document_id}", response_model=DocumentResponseModel)
     def get_document(document_id: str):
@@ -226,48 +318,57 @@ def create_app(state: DocumentState, document_path: Path) -> FastAPI:
             documentId=response_document_id,
         )
 
-    @app.get("/stt_token", response_model=StsTokenResponse)
-    def get_stt_token():
-        document_state = app.state.document_state
-        if document_state.aws_session is None or document_state.region_name is None:
-            raise HTTPException(status_code=500, detail="AWS session not configured")
-        client = document_state.aws_session.client(
-            "sts",
-            region_name=document_state.region_name,
-        )
-        policy = {
-            "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Effect": "Allow",
-                    "Action": [
-                        "transcribe:StartStreamTranscription",
-                        "transcribe:StartStreamTranscriptionWebSocket",
-                        "transcribe:StartTranscriptionJob",
-                        "transcribe:GetTranscriptionJob",
-                    ],
-                    "Resource": "*",
-                }
-            ],
-        }
-        try:
-            resp = client.get_federation_token(
-                Name="agentic-editor-stt",
-                Policy=json.dumps(policy),
-                DurationSeconds=900,
-            )
-        except ClientError as exc:
-            logging.error("Failed to obtain STS token: %s", exc)
-            raise HTTPException(status_code=500, detail="Failed to obtain STS token")
-        creds = resp.get("Credentials")
-        if not creds:
-            raise HTTPException(status_code=500, detail="Invalid STS response")
-        return StsTokenResponse(
-            access_key_id=creds["AccessKeyId"],
-            secret_access_key=creds["SecretAccessKey"],
-            session_token=creds["SessionToken"],
-            expiration=creds["Expiration"].isoformat() if hasattr(creds["Expiration"], "isoformat") else str(creds["Expiration"]),
-        )
+    if app.state.asr_type == "gemma4":
+        @app.websocket("/ws/asr")
+        async def asr_websocket(websocket: WebSocket):
+            await websocket.accept()
+            buffer = None
+            try:
+                if app.state.asr_receiver is None:
+                    from agentic_editor.gemma4 import Gemma4AsrReceiver
+
+                    app.state.asr_receiver = Gemma4AsrReceiver(app.state.asr_config)
+                receiver = app.state.asr_receiver
+                while True:
+                    message = await websocket.receive()
+                    message_type = message["type"]
+
+                    if message_type == "websocket.disconnect":
+                        return
+
+                    if message.get("text") is not None:
+                        payload = json.loads(message["text"])
+                        event_type = payload.get("type")
+
+                        if event_type == "start":
+                            buffer = receiver.create_buffer()
+                            await websocket.send_json({"type": "started"})
+                        elif event_type == "end":
+                            if buffer is None:
+                                raise ValueError("Received end before start")
+                            instructions = await run_in_threadpool(
+                                receiver.transcribe_audio,
+                                buffer.to_float32(),
+                                document=app.state.document_state.document,
+                            )
+                            await websocket.send_json(
+                                {"type": "result", "instructions": instructions}
+                            )
+                            await websocket.close()
+                            return
+                        elif event_type == "cancel":
+                            await websocket.close(code=1000)
+                            return
+                        else:
+                            raise ValueError(f"Unknown ASR websocket event type: {event_type!r}")
+                    elif message.get("bytes") is not None:
+                        if buffer is None:
+                            raise ValueError("Received binary audio before start")
+                        buffer.append_bytes(typing.cast(bytes, message["bytes"]))
+            except Exception as exc:
+                logging.exception("ASR websocket failed")
+                await websocket.send_json({"type": "error", "detail": str(exc)})
+                await websocket.close(code=1011)
     return app
 
 
@@ -287,8 +388,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--region",
-        default="us-east-1",
-        help="AWS region to use for Polly (default: us-east-1).",
+        help="AWS region to use when configured.",
     )
     parser.add_argument(
         "--cache-dir",
@@ -331,7 +431,7 @@ def main():
 
     if "voice_id" not in config:
         config["voice_id"] = args.voice_id
-    if "region_name" not in config:
+    if args.region is not None:
         config["region_name"] = args.region
     if "cache_dir" not in config:
         config["cache_dir"] = args.cache_dir
@@ -353,7 +453,11 @@ def main():
         logging.error("Failed to preprocess document: %s", exc)
         raise SystemExit(1) from exc
 
-    app = create_app(state, document_path)
+    app = create_app(
+        state,
+        document_path,
+        config=config,
+    )
     uvicorn.run(app, host=args.host, port=args.port)
 
 

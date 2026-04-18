@@ -1,5 +1,6 @@
 import boto3
 import hashlib
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -52,7 +53,7 @@ def _sha256_text(text: str) -> str:
 def test_api_endpoints(document_state, sample_document):
     path, _doc_text = sample_document
     document_id = _sha256_text(str(path.resolve()))
-    app = backend.create_app(document_state, document_id)
+    app = backend.create_app(document_state, path, config={"region_name": "us-east-1"})
     client = TestClient(app)
 
     status_resp = client.get("/status")
@@ -77,9 +78,8 @@ def test_api_endpoints(document_state, sample_document):
     assert interrupt["docCharPosition"] >= 0
 
 
-def test_stt_token_endpoint(document_state, monkeypatch, sample_document):
+def test_asr_endpoint_aws(document_state, sample_document):
     path, _doc_text = sample_document
-    document_id = _sha256_text(str(path.resolve()))
     fake_creds = {
         "AccessKeyId": "AKIAFAKE",
         "SecretAccessKey": "SECRET",
@@ -98,12 +98,54 @@ def test_stt_token_endpoint(document_state, monkeypatch, sample_document):
 
     document_state.aws_session = FakeSession()
     document_state.region_name = "us-east-1"
-    app = backend.create_app(document_state, document_id)
+    app = backend.create_app(document_state, path, config={"region_name": "us-east-1"})
     client = TestClient(app)
 
-    resp = client.get("/stt_token")
+    resp = client.get("/asr")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["access_key_id"] == fake_creds["AccessKeyId"]
-    assert data["secret_access_key"] == fake_creds["SecretAccessKey"]
-    assert data["session_token"] == fake_creds["SessionToken"]
+    assert data["type"] == "aws"
+    assert data["region"] == "us-east-1"
+    assert data["stsToken"]["access_key_id"] == fake_creds["AccessKeyId"]
+    assert data["stsToken"]["secret_access_key"] == fake_creds["SecretAccessKey"]
+    assert data["stsToken"]["session_token"] == fake_creds["SessionToken"]
+
+
+def test_asr_endpoint_gemma4(document_state, sample_document):
+    path, _doc_text = sample_document
+    app = backend.create_app(document_state, path, config={})
+    client = TestClient(app)
+
+    resp = client.get("/asr")
+    assert resp.status_code == 200
+    assert resp.json() == {"type": "gemma4"}
+
+
+def test_asr_websocket_returns_transcription(document_state, sample_document):
+    path, _doc_text = sample_document
+
+    class FakeAsrReceiver:
+        model_name = "google/gemma-4-E4B-it"
+
+        def create_buffer(self):
+            from agentic_editor.gemma4 import AudioWebSocketBuffer
+
+            return AudioWebSocketBuffer()
+
+        def transcribe_audio(self, audio, *, document: str):
+            assert isinstance(audio, np.ndarray)
+            assert "Hello world." in document
+            return "replace hello with hi"
+
+    app = backend.create_app(document_state, path, config={}, asr_receiver=FakeAsrReceiver())
+    client = TestClient(app)
+
+    with client.websocket_connect("/ws/asr") as websocket:
+        websocket.send_json({"type": "start"})
+        started = websocket.receive_json()
+        assert started["type"] == "started"
+        websocket.send_bytes((np.zeros(4000, dtype=np.int16)).tobytes())
+        websocket.send_json({"type": "end"})
+        result = websocket.receive_json()
+        assert result["type"] == "result"
+        assert result["instructions"] == "replace hello with hi"
