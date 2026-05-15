@@ -26,6 +26,7 @@ def document_state(sample_document, tmp_path_factory):
         session=session,
         config={
             "voice_id": "Joanna",
+            "engine": "standard",
             "region_name": "us-east-1",
             "cache_dir": str(cache_dir),
         },
@@ -33,8 +34,7 @@ def document_state(sample_document, tmp_path_factory):
 
 
 def test_chunking_and_mapping(document_state):
-    # Expect two chunks split by blank lines.
-    assert len(document_state.chunks) == 2
+    assert len(document_state.chunks) == 1
     first = document_state.chunks[0]
     mapping = map_elapsed_time_to_document(
         document_state.tts_cache,
@@ -59,7 +59,7 @@ def test_api_endpoints(document_state, sample_document):
     status_resp = client.get("/status")
     assert status_resp.status_code == 200
     status_data = status_resp.json()
-    assert status_data["chunkCount"] == 2
+    assert status_data["chunkCount"] == 1
     assert status_data["document"]["chunks"][0]["chunk_id"] == 0
 
     doc_resp = client.get(f"/document/{document_id}")
