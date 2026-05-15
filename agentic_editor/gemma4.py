@@ -10,8 +10,8 @@ import torch
 _DEFAULT_MODEL_NAME = "google/gemma-4-E4B-it"
 _SAMPLE_RATE = 16000
 _MAX_AUDIO_SECONDS = 30.0
-_MAX_REFERENCE_CHARS = 24_000
-_MAX_NEW_TOKENS = 2048192
+_MAX_REFERENCE_CHARS = 65536
+_MAX_NEW_TOKENS = 2048
 
 _SYSTEM_PROMPT = """<|think|>
 You are a literal transcription engine for spoken document-editing instructions.
