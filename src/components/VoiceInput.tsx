@@ -21,6 +21,7 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
   const [vadThreshold, setVadThreshold] = useState(0.05);
   const [rms, setRms] = useState(0);
   const [instructions, setInstructions] = useState("");
+  const [sttCompleted, setSttCompleted] = useState(false);
   const sttRef = useRef<SpeechToText | null>(null);
 
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
@@ -51,8 +52,7 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
     triggeredRef.current = false;
     aboveCountRef.current = 0;
     setVadState("waiting");
-    emitInstructions(instructions);
-    console.log("instructions:", instructions);
+    setSttCompleted(true);
   });
 
   const emitInterrupt = useEffectEvent(() => {
@@ -68,14 +68,22 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
       triggeredRef.current = false;
       aboveCountRef.current = 0;
       setVadState("idle");
+      setSttCompleted(false);
       return;
     }
     if (enabled && audioContext && micStream) {
       setVadState("listening");
       triggeredRef.current = false;
       setInstructions("");
+      setSttCompleted(false);
     }
   }, [enabled, audioContext, micStream]);
+
+  useEffect(() => {
+    if (!sttCompleted) return;
+    emitInstructions(instructions);
+    setSttCompleted(false);
+  }, [sttCompleted, instructions, emitInstructions]);
 
   useEffect(() => {
     if (!audioContext || !micStream) return;
