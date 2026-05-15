@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import io
+import logging
 import os
+import re
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
-from threading import Lock, RLock
+from threading import BoundedSemaphore, Lock, RLock
 from typing import Any, List, Sequence
 
 import numpy as np
@@ -22,6 +25,81 @@ _QWEN_LANGUAGE = "English"
 _WHISPERX_LANGUAGE = "en"
 _WHISPERX_MODEL = "large-v3"
 _WHISPERX_SAMPLE_RATE = 16000
+QWEN_TTS_BATCH_SIZE = 1
+QWEN_TTS_MAX_CONCURRENCY = 6
+QWEN_TTS_INTER_PARAGRAPH_GAP_SECONDS = 0.2
+_OMEGACONF_SAFE_GLOBALS_REGISTERED = False
+_TORCH_LOAD_PATCH_LOCK = RLock()
+
+
+def _register_omegaconf_safe_globals() -> None:
+    global _OMEGACONF_SAFE_GLOBALS_REGISTERED
+    if _OMEGACONF_SAFE_GLOBALS_REGISTERED:
+        return
+    add_safe_globals = getattr(torch.serialization, "add_safe_globals", None)
+    if add_safe_globals is None:
+        _OMEGACONF_SAFE_GLOBALS_REGISTERED = True
+        return
+
+    from omegaconf.base import ContainerMetadata, Metadata, Node, UnionNode
+    from omegaconf.dictconfig import BaseContainer, DictConfig, ValueNode
+    from omegaconf.listconfig import ListConfig
+    from omegaconf.nodes import (
+        AnyNode,
+        BooleanNode,
+        BytesNode,
+        EnumNode,
+        FloatNode,
+        IntegerNode,
+        InterpolationResultNode,
+        PathNode,
+        StringNode,
+    )
+
+    add_safe_globals(
+        [
+            Any,
+            AnyNode,
+            BaseContainer,
+            BooleanNode,
+            BytesNode,
+            ContainerMetadata,
+            DictConfig,
+            EnumNode,
+            FloatNode,
+            IntegerNode,
+            InterpolationResultNode,
+            ListConfig,
+            Metadata,
+            Node,
+            PathNode,
+            StringNode,
+            UnionNode,
+            ValueNode,
+        ]
+    )
+    _OMEGACONF_SAFE_GLOBALS_REGISTERED = True
+
+
+@contextmanager
+def _torch_load_with_weights_only_disabled():
+    original_torch_load = torch.load
+    original_default_to_weights_only = torch.serialization._default_to_weights_only
+
+    def patched_torch_load(*args, **kwargs):
+        kwargs.setdefault("weights_only", False)
+        return original_torch_load(*args, **kwargs)
+
+    with _TORCH_LOAD_PATCH_LOCK:
+        torch.load = patched_torch_load
+        torch.serialization._default_to_weights_only = lambda pickle_module: False
+        try:
+            yield
+        finally:
+            torch.load = original_torch_load
+            torch.serialization._default_to_weights_only = (
+                original_default_to_weights_only
+            )
 
 
 class QwenTtsCache(AbstractTtsCache):
@@ -92,6 +170,8 @@ class QwenTtsCache(AbstractTtsCache):
         self.preprocessed_sample_dir.mkdir(parents=True, exist_ok=True)
 
         self._load_lock = RLock()
+        self._qwen_semaphore = BoundedSemaphore(value=QWEN_TTS_MAX_CONCURRENCY)
+        self._whisperx_lock = RLock()
         self._prompt_cache_lock = Lock()
         self._model = None
         self._voice_clone_prompt_item_type = None
@@ -129,14 +209,21 @@ class QwenTtsCache(AbstractTtsCache):
         prompt_path = self._prompt_cache_path()
         with self._prompt_cache_lock:
             if prompt_path.is_file():
-                return self._deserialize_prompt_items(
-                    torch.load(prompt_path, map_location="cpu")
-                )
+                try:
+                    payload = torch.load(prompt_path, map_location="cpu")
+                    return self._deserialize_prompt_items(payload)
+                except Exception as exc:
+                    logging.warning(
+                        "Discarding unreadable Qwen prompt cache %s: %s",
+                        prompt_path,
+                        exc,
+                    )
+                    prompt_path.unlink(missing_ok=True)
 
-        prompt_items = self._build_prompt_items_for_voice()
-        prompt_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(self._serialize_prompt_items(prompt_items), prompt_path)
-        return prompt_items
+            prompt_items = self._build_prompt_items_for_voice()
+            prompt_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(self._serialize_prompt_items(prompt_items), prompt_path)
+            return prompt_items
 
     def _build_prompt_items_for_voice(self) -> list[object]:
         model = self._ensure_loaded()
@@ -144,36 +231,83 @@ class QwenTtsCache(AbstractTtsCache):
         ref_text = self.ref_text
         if not self.x_vector_only_mode and not ref_text:
             ref_text = self._transcribe_voice_sample(sample_path)
-        return list(
-            model.create_voice_clone_prompt(
-                ref_audio=str(sample_path),
-                ref_text=ref_text,
-                x_vector_only_mode=self.x_vector_only_mode,
+        with self._qwen_semaphore:
+            return list(
+                model.create_voice_clone_prompt(
+                    ref_audio=str(sample_path),
+                    ref_text=ref_text,
+                    x_vector_only_mode=self.x_vector_only_mode,
+                )
             )
-        )
 
     def _generate_audio(
         self,
         text: str,
         prompt_items: Sequence[object],
     ) -> tuple[np.ndarray, int]:
+        segments = self._split_text_into_qwen_segments(text)
+        if not segments:
+            raise RuntimeError("Qwen received empty text after paragraph splitting")
+
         model = self._ensure_loaded()
         generation_kwargs: dict[str, Any] = {}
         if self.temperature is not None:
             generation_kwargs["temperature"] = self.temperature
-        wavs, sample_rate = model.generate_voice_clone(
-            text=[text],
-            language=[self.language],
-            voice_clone_prompt=list(prompt_items),
-            non_streaming_mode=True,
-            **generation_kwargs,
-        )
-        if not wavs:
-            raise RuntimeError("Qwen returned no audio")
-        audio = self._normalize_audio_array(wavs[0])
-        if self._sample_rate is None:
-            self._sample_rate = int(sample_rate)
-        return audio, int(sample_rate)
+        combined_audio: list[np.ndarray] = []
+        output_sample_rate: int | None = None
+        gap_audio: np.ndarray | None = None
+
+        with self._qwen_semaphore:
+            for batch_start in range(0, len(segments), QWEN_TTS_BATCH_SIZE):
+                text_batch = segments[batch_start : batch_start + QWEN_TTS_BATCH_SIZE]
+                wavs, sample_rate = model.generate_voice_clone(
+                    text=text_batch,
+                    language=[self.language] * len(text_batch),
+                    voice_clone_prompt=list(prompt_items),
+                    non_streaming_mode=True,
+                    **generation_kwargs,
+                )
+                if not wavs:
+                    raise RuntimeError("Qwen returned no audio")
+                if len(wavs) != len(text_batch):
+                    raise RuntimeError(
+                        f"Qwen returned {len(wavs)} waveforms for {len(text_batch)} inputs"
+                    )
+                batch_sample_rate = int(sample_rate)
+                if output_sample_rate is None:
+                    output_sample_rate = batch_sample_rate
+                    if self._sample_rate is None:
+                        self._sample_rate = batch_sample_rate
+                    gap_audio = self._inter_paragraph_gap_audio(batch_sample_rate)
+                elif batch_sample_rate != output_sample_rate:
+                    raise RuntimeError(
+                        f"Qwen changed sample rate across batches: {output_sample_rate} vs {batch_sample_rate}"
+                    )
+                for wav_index, wav in enumerate(wavs):
+                    if combined_audio and gap_audio is not None and gap_audio.size:
+                        combined_audio.append(gap_audio)
+                    combined_audio.append(self._normalize_audio_array(wav))
+
+        if output_sample_rate is None or not combined_audio:
+            raise RuntimeError("Qwen returned no normalized audio")
+        return np.concatenate(combined_audio), output_sample_rate
+
+    def _split_text_into_qwen_segments(self, text: str) -> list[str]:
+        stripped = text.strip()
+        if not stripped:
+            return []
+        segments = [
+            paragraph.strip()
+            for paragraph in re.split(r"(?:\r?\n\s*){2,}", text)
+            if paragraph.strip()
+        ]
+        return segments or [stripped]
+
+    def _inter_paragraph_gap_audio(self, sample_rate: int) -> np.ndarray:
+        gap_samples = int(round(sample_rate * QWEN_TTS_INTER_PARAGRAPH_GAP_SECONDS))
+        if gap_samples <= 0:
+            return np.zeros(0, dtype=np.float32)
+        return np.zeros(gap_samples, dtype=np.float32)
 
     def _transcribe_voice_sample(self, sample_path: Path) -> str:
         transcript_path = self._transcript_cache_path()
@@ -181,12 +315,14 @@ class QwenTtsCache(AbstractTtsCache):
             return transcript_path.read_text(encoding="utf-8")
 
         audio = self._load_audio_path(sample_path)
-        asr_model = self._ensure_asr_model()
-        transcription = asr_model.transcribe(
-            audio,
-            batch_size=10,
-            language=self.whisperx_language,
-        )
+        with self._whisperx_lock:
+            asr_model = self._ensure_asr_model()
+            with _torch_load_with_weights_only_disabled():
+                transcription = asr_model.transcribe(
+                    audio,
+                    batch_size=10,
+                    language=self.whisperx_language,
+                )
         transcript = " ".join(
             segment["text"].strip()
             for segment in transcription.get("segments", [])
@@ -208,15 +344,16 @@ class QwenTtsCache(AbstractTtsCache):
             len(aligned_audio) / _WHISPERX_SAMPLE_RATE if len(aligned_audio) else 0.0
         )
         transcript = [{"start": 0.0, "end": duration_seconds, "text": text}]
-        align_model, metadata = self._ensure_align_model()
-        aligned = whisperx.align(
-            transcript,
-            align_model,
-            metadata,
-            aligned_audio,
-            self.whisperx_device,
-            return_char_alignments=False,
-        )
+        with self._whisperx_lock:
+            align_model, metadata = self._ensure_align_model()
+            aligned = whisperx.align(
+                transcript,
+                align_model,
+                metadata,
+                aligned_audio,
+                self.whisperx_device,
+                return_char_alignments=False,
+            )
         records: list[dict[str, object]] = []
         for word in aligned.get("word_segments", []):
             word_text = str(word.get("word", "")).strip()
@@ -245,7 +382,11 @@ class QwenTtsCache(AbstractTtsCache):
                     "ref_spk_embedding": item.ref_spk_embedding.detach().cpu(),  # type: ignore[attr-defined]
                     "x_vector_only_mode": bool(item.x_vector_only_mode),  # type: ignore[attr-defined]
                     "icl_mode": bool(item.icl_mode),  # type: ignore[attr-defined]
-                    "ref_text": item.ref_text,  # type: ignore[attr-defined]
+                    "ref_text": (
+                        None
+                        if item.ref_text is None  # type: ignore[attr-defined]
+                        else str(item.ref_text)  # type: ignore[attr-defined]
+                    ),
                 }
             )
         return payload
@@ -305,22 +446,26 @@ class QwenTtsCache(AbstractTtsCache):
         with self._load_lock:
             if self._asr_model is not None:
                 return self._asr_model
-            self._asr_model = whisperx.load_model(
-                self.whisperx_model_name,
-                self.whisperx_device,
-                compute_type="default",
-                language=self.whisperx_language,
-            )
+            _register_omegaconf_safe_globals()
+            with _torch_load_with_weights_only_disabled():
+                self._asr_model = whisperx.load_model(
+                    self.whisperx_model_name,
+                    self.whisperx_device,
+                    compute_type="default",
+                    language=self.whisperx_language,
+                )
             return self._asr_model
 
     def _ensure_align_model(self):
         with self._load_lock:
             if self._align_model is not None and self._align_metadata is not None:
                 return self._align_model, self._align_metadata
-            self._align_model, self._align_metadata = whisperx.load_align_model(
-                language_code=self.whisperx_language,
-                device=self.whisperx_device,
-            )
+            _register_omegaconf_safe_globals()
+            with _torch_load_with_weights_only_disabled():
+                self._align_model, self._align_metadata = whisperx.load_align_model(
+                    language_code=self.whisperx_language,
+                    device=self.whisperx_device,
+                )
             return self._align_model, self._align_metadata
 
     def _prompt_cache_path(self) -> Path:
