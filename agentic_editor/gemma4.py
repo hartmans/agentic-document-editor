@@ -52,7 +52,7 @@ Return concise guidance only. Keep it compact but information-dense.
 
 _AUDIO_USER_PROMPT = """Use the reference document and your prior guidance to interpret the attached audio.
 
-Output only the final normalized instruction text for a future editor model.
+Output only the final normalized instruction text for a future editor model. If the audio contains no instructions, output an empty string.
 
 The output should be a clean editing instruction, not a literal transcript. Fold in self-corrections and resolve names or spelling from context.
 

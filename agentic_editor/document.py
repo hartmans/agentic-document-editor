@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
@@ -39,9 +40,36 @@ class SearchTextResult:
     candidates: list[SearchTextCandidate]
     reason: str
 
-    def render_error(self)-> str:
-        candidates = [c.model_dump() for c in self.candidates]
-        return f'Unable to find the text you pointed to: {self.reason}. Call the tool again using the before/after text from one of these candidates: {candidates}'
+    def render_error(self, *, target_field_name: str = "target") -> str:
+        candidates = []
+        for candidate in self.candidates:
+            candidates.append(
+                {
+                    "before": candidate.before,
+                    target_field_name: candidate.target,
+                    "after": candidate.after,
+                    "span_text": candidate.span_text,
+                    "span_start": candidate.span_start,
+                    "span_end": candidate.span_end,
+                }
+            )
+        return json.dumps(
+            {
+                "error": "search_text_no_match",
+                "reason": self.reason,
+                "message": (
+                    "Unable to find the requested text. Call the tool again using "
+                    "exactly one candidate. Copy before, "
+                    f"{target_field_name}, and after verbatim."
+                ),
+                "retry_instructions": (
+                    "If a value contains a newline, pass a real newline character, "
+                    "not the two-character sequence backslash-n."
+                ),
+                "candidates": candidates,
+            },
+            ensure_ascii=False,
+        )
 
 @dataclass
 class TextChunk:
@@ -283,25 +311,27 @@ def _build_unique_candidate_for_target(
     right_max = len(right_full)
 
     while True:
-        before_text, after_text = _candidate_context(
-            document,
-            target_start,
-            target_end,
-            left_len,
-            right_len,
-        )
-        matches = _matching_targets(
-            document, target, before_text, after_text, cfg.radius, target_indices
-        )
-        if len(matches) == 1 and matches[0] == target_start:
-            return _make_candidate(
+        for avoid_newlines in (True, False):
+            before_text, after_text = _candidate_context(
                 document,
-                before_text,
-                target,
-                after_text,
                 target_start,
                 target_end,
+                left_len,
+                right_len,
+                avoid_newlines=avoid_newlines,
             )
+            matches = _matching_targets(
+                document, target, before_text, after_text, cfg.radius, target_indices
+            )
+            if len(matches) == 1 and matches[0] == target_start:
+                return _make_candidate(
+                    document,
+                    before_text,
+                    target,
+                    after_text,
+                    target_start,
+                    target_end,
+                )
         if left_len >= left_max and right_len >= right_max:
             return None
         if left_len < left_max:
@@ -316,6 +346,8 @@ def _candidate_context(
     target_end: int,
     left_len: int,
     right_len: int,
+    *,
+    avoid_newlines: bool = False,
 ) -> tuple[str, str]:
     before_start = max(0, target_start - left_len)
     after_end = min(len(document), target_end + right_len)
@@ -325,6 +357,9 @@ def _candidate_context(
 
     before_text = document[before_start:target_start]
     after_text = document[target_end:after_end]
+    if avoid_newlines:
+        before_text = before_text.split("\n")[-1]
+        after_text = after_text.split("\n", 1)[0]
     return before_text, after_text
 
 

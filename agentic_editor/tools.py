@@ -42,7 +42,7 @@ def replace_text(
 
     result = state.search_text(before, old_text, after)
     if result.index is None:
-        return result.render_error()
+        return result.render_error(target_field_name="old_text")
     updated = document[:result.index] + new_text + document[result.index + len(old_text) :]
     return Command(update={
         'document': updated,

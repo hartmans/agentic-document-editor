@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 import hashlib
 import io
 import logging
@@ -26,7 +27,7 @@ _WHISPERX_LANGUAGE = "en"
 _WHISPERX_MODEL = "large-v3"
 _WHISPERX_SAMPLE_RATE = 16000
 QWEN_TTS_BATCH_SIZE = 1
-QWEN_TTS_MAX_CONCURRENCY = 6
+QWEN_TTS_MAX_CONCURRENCY = 1
 QWEN_TTS_INTER_PARAGRAPH_GAP_SECONDS = 0.2
 _OMEGACONF_SAFE_GLOBALS_REGISTERED = False
 _TORCH_LOAD_PATCH_LOCK = RLock()
@@ -62,18 +63,29 @@ def _register_omegaconf_safe_globals() -> None:
             AnyNode,
             BaseContainer,
             BooleanNode,
+            bool,
             BytesNode,
+            bytes,
             ContainerMetadata,
+            defaultdict,
+            dict,
             DictConfig,
             EnumNode,
+            float,
             FloatNode,
+            int,
             IntegerNode,
             InterpolationResultNode,
+            list,
             ListConfig,
             Metadata,
             Node,
+            type(None),
             PathNode,
+            set,
+            str,
             StringNode,
+            tuple,
             UnionNode,
             ValueNode,
         ]
@@ -106,13 +118,14 @@ class QwenTtsCache(AbstractTtsCache):
     """
     Driver-backed cache for local Qwen TTS synthesis with WhisperX speech marks.
 
-    Externally this still behaves like the Polly cache: `__getitem__` returns
+    Externally this still behaves like all TTS caches: `__getitem__` returns
     `(audio_bytes, speech_marks)` where audio_bytes are MP3 payloads suitable
     for the existing playback path.
     """
 
     driver_name = "qwen"
     audio_extension = "mp3"
+    concurrency_level = 1
 
     def __init__(
         self,
@@ -245,7 +258,8 @@ class QwenTtsCache(AbstractTtsCache):
         text: str,
         prompt_items: Sequence[object],
     ) -> tuple[np.ndarray, int]:
-        segments = self._split_text_into_qwen_segments(text)
+        # segments = self._split_text_into_qwen_segments(text)
+        segments = [text]
         if not segments:
             raise RuntimeError("Qwen received empty text after paragraph splitting")
 

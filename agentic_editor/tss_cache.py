@@ -17,7 +17,6 @@ import sh
 
 from agentic_editor.speech_marks import SpeechMark
 
-_TTS_EXECUTOR = ThreadPoolExecutor(max_workers=6)
 
 
 def _speech_marks_to_records(marks: Sequence[SpeechMark]) -> List[dict]:
@@ -45,6 +44,7 @@ class AbstractTtsCache(ABC):
 
     driver_name = "base"
     audio_extension = "bin"
+    concurrency_level = 6
 
     def __init__(
         self,
@@ -56,6 +56,7 @@ class AbstractTtsCache(ABC):
         self.prefix = prefix
         if self.prefix and not self.prefix.endswith("_"):
             self.prefix = f"{self.prefix}_"
+        self._tts_executor = ThreadPoolExecutor(max_workers = self.concurrency_level)
 
         self.filter = self._get_config("filter")
         cache_dir = self._get_config("cache_dir")
@@ -74,7 +75,8 @@ class AbstractTtsCache(ABC):
         ] = {}
         self._lock = threading.RLock()
         self._work_available = threading.Condition(self._lock)
-        self._background_items: set[str] = set()
+        self._background_items: deque[str] = deque()
+        self._background_keys: set[str] = set()
         self._urgent_items: deque[str] = deque()
         self._urgent_keys: set[str] = set()
         self._running_workers = 0
@@ -105,8 +107,7 @@ class AbstractTtsCache(ABC):
             if entry is not None:
                 return
             self._cache[key] = _CacheEntry(text=text)
-            self._background_items.add(key)
-            self._work_available.notify()
+            self._enqueue_background_locked(key)
 
     def __getitem__(self, text: str) -> tuple[bytes, List[SpeechMark]]:
         key = self._key(text)
@@ -122,7 +123,7 @@ class AbstractTtsCache(ABC):
                 entry = cached_entry
                 if entry.state == "pending" and not entry.urgent:
                     entry.urgent = True
-                    self._background_items.discard(key)
+                    self._background_keys.discard(key)
                     self._enqueue_urgent_locked(key)
             elif audio_path.exists() and marks_path.exists():
                 pass
@@ -235,7 +236,7 @@ class AbstractTtsCache(ABC):
         with self._work_available:
             while True:
                 while (
-                    self._running_workers >= _TTS_EXECUTOR._max_workers
+                    self._running_workers >= self._tts_executor._max_workers
                     or (not self._urgent_items and not self._background_items)
                 ):
                     self._work_available.wait()
@@ -245,7 +246,7 @@ class AbstractTtsCache(ABC):
                     entry.state = "running"
                     self._running_workers += 1
                     break
-        future = _TTS_EXECUTOR.submit(
+        future = self._tts_executor.submit(
             self._synthesize_cache_entry,
             entry.text,
             self._audio_path(key),
@@ -267,11 +268,21 @@ class AbstractTtsCache(ABC):
             if isinstance(entry, _CacheEntry) and entry.state == "pending" and entry.urgent:
                 return key, entry
         while self._background_items:
-            key = self._background_items.pop()
+            key = self._background_items.popleft()
+            if key not in self._background_keys:
+                continue
+            self._background_keys.discard(key)
             entry = self._cache.get(key)
             if isinstance(entry, _CacheEntry) and entry.state == "pending" and not entry.urgent:
                 return key, entry
         return None
+
+    def _enqueue_background_locked(self, key: str) -> None:
+        if key in self._background_keys:
+            return
+        self._background_keys.add(key)
+        self._background_items.append(key)
+        self._work_available.notify()
 
     def _enqueue_urgent_locked(self, key: str) -> None:
         if key in self._urgent_keys:

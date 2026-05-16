@@ -1,3 +1,5 @@
+import json
+
 from agentic_editor.document import DocumentState
 
 
@@ -93,3 +95,32 @@ def test_search_text_long_before_after_within_radius():
     assert result.index == doc.index("TARGET")
     assert result.candidates == []
     assert result.reason == "unique_match"
+
+
+def test_render_error_returns_json_with_tool_specific_target_field():
+    state = _state("intro target outro")
+    result = state.search_text("missing", "target", "absent")
+
+    payload = json.loads(result.render_error(target_field_name="old_text"))
+
+    assert payload["error"] == "search_text_no_match"
+    assert payload["reason"] == "no_match"
+    assert "old_text" in payload["message"]
+    assert "backslash-n" in payload["retry_instructions"]
+    assert payload["candidates"][0]["old_text"] == "target"
+    assert "target" not in payload["candidates"][0]
+
+
+def test_search_text_candidates_prefer_context_without_newlines():
+    doc = "lead-in text. If I do well, I can finish the thesis.\nIt would help later."
+    state = _state(doc)
+
+    result = state.search_text("missing", "If I do well, I can finish the thesis.", "absent")
+
+    assert result.index is None
+    assert result.reason == "no_match"
+    assert result.candidates
+    candidate = result.candidates[0]
+    assert candidate.target == "If I do well, I can finish the thesis."
+    assert "\n" not in candidate.before
+    assert "\n" not in candidate.after
