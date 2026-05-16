@@ -7,24 +7,46 @@ from langgraph.runtime import Runtime
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.types import Overwrite, Command
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
+from langchain.chat_models import init_chat_model
 import langchain_core.language_models
 import dataclasses
-import hartmans_ai
 from .document import DocumentState, DocumentUpdate, apply_document_update
 from . import tools
 from .llm_logging import ChatMLJsonlCallbackHandler
 from pydantic import BaseModel, Field
 
-def _build_llm() -> langchain_core.language_models.BaseChatModel:
+_DEFAULT_LLM_CONFIG = {"model": "ollama:gemma4:31b"}
+
+
+def _parse_model_ref(model_ref: str) -> tuple[str, str | None]:
+    provider, sep, model_name = model_ref.partition(":")
+    if sep and provider:
+        return model_name, provider
+    return model_ref, None
+
+
+def _build_llm(
+    config: dict[str, typing.Any] | None = None,
+) -> langchain_core.language_models.BaseChatModel:
+    config = config or {}
+    llm_config = config.get("llm") or dict(_DEFAULT_LLM_CONFIG)
+    if not isinstance(llm_config, dict):
+        raise ValueError("llm config must be a mapping if provided")
+
+    model_name, model_provider = _parse_model_ref(str(llm_config.get("model") or _DEFAULT_LLM_CONFIG["model"]))
     log_path = os.environ.get("LLM_CHATML_LOG_PATH")
     output_path = Path(log_path) if log_path else Path.cwd() / "logs" / "llm_chatml.jsonl"
     handler = ChatMLJsonlCallbackHandler(output_path)
-    return hartmans_ai.local_llamacpp_model.build_langchain_model(
-        callbacks=[handler],
-    )
-
-
-llm: langchain_core.language_models.BaseChatModel = _build_llm()
+    init_kwargs: dict[str, typing.Any] = {
+        "model": model_name,
+        "callbacks": [handler],
+    }
+    if model_provider:
+        init_kwargs["model_provider"] = model_provider
+    for key, value in llm_config.items():
+        if key != "model":
+            init_kwargs[key] = value
+    return init_chat_model(**init_kwargs)
 
 FOCUS_RADIUS = 150
 TOOLS = [tools.replace_text, tools.reposition_playback]
@@ -61,7 +83,10 @@ async def initial_node(state: GraphState)-> dict:
     assert state.document_state
     return {'document': state.document_state.document}
 
-async def llm_call(state: GraphState) -> dict:
+async def _llm_call_with_model(
+    llm: langchain_core.language_models.BaseChatModel,
+    state: GraphState,
+) -> dict:
     assert state.document
     tool_llm = llm.bind_tools(TOOLS)
     document = state.document
@@ -130,7 +155,16 @@ async def our_tool_node(state:GraphState, runtime:Runtime) -> Command | typing.S
         case _:
             return Command(goto=default_destination, update=result)
 
-def build_graph():
+def build_graph(
+    config: dict[str, typing.Any] | None = None,
+    *,
+    llm: langchain_core.language_models.BaseChatModel | None = None,
+):
+    graph_llm = llm or _build_llm(config)
+
+    async def llm_call(state: GraphState) -> dict:
+        return await _llm_call_with_model(graph_llm, state)
+
     graph = StateGraph(GraphState)
     graph.add_node('initial_node', initial_node)
     graph.add_node("llm_call", llm_call)
