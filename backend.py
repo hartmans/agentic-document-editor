@@ -185,7 +185,7 @@ def create_app(
     app.state.document_id = document_id
     app.state.document_path = document_path
     app.state.documents  = {document_id: state}
-    app.state.graph = build_graph()
+    app.state.graph = build_graph(config)
     app.state.asr_type = _resolve_asr_type(config)
     app.state.asr_region_name = str(config["region_name"]) if config.get("region_name") else None
     app.state.asr_receiver = asr_receiver
@@ -288,10 +288,10 @@ def create_app(
             output_state = result
         else:
             output_state = GraphState(**result)
-            if isinstance(output_state.messages[-1], AIMessage):
-                response_message = output_state.messages[-1]
-            else:
-                raise RuntimeError('No AI response')
+        if isinstance(output_state.messages[-1], AIMessage):
+            response_message = output_state.messages[-1]
+        else:
+            raise RuntimeError('No AI response')
         app.state.document_state = output_state.document_state
         app.state.documents[app.state.document_id] = output_state.document_state
         response_text = response_message.content # pyright: ignore[reportPossiblyUnboundVariable]
