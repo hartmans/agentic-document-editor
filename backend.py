@@ -1,5 +1,5 @@
 """
-Agentic document editor foundation: chunk text, synthesize speech with Amazon Polly,
+Agentic document editor foundation: chunk text, synthesize speech with Amazon Polly or qwen_tts,
 track timing via speech marks, and expose a FastAPI server for playback and
 interruption-to-text mapping.
 """
