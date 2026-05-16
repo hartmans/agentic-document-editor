@@ -607,7 +607,7 @@ class QwenTtsCache(AbstractTtsCache):
         return np.ascontiguousarray(array, dtype=np.float32)
 
     def _normalize_device(self, device: str) -> str:
-        normalized = (device or "cpu").lower()
+        normalized = (device or "cuda").lower()
         if normalized == "cuda" and not torch.cuda.is_available():
             return "cpu"
         if normalized == "mps":
