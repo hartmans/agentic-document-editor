@@ -2,7 +2,7 @@ const rawBase = import.meta.env.VITE_API_BASE;
 const API_BASE =
   rawBase && rawBase.trim()
     ? rawBase.trim().replace(/\/+$/, "")
-    : "http://localhost:8000";
+    : "/api";
 
 function join(base: string, path: string): string {
   return `${base.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;

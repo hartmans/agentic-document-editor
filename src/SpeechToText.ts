@@ -485,7 +485,7 @@ function buildGemma4WebSocketUrl(): string {
     }
   }
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/ws/asr`;
+  return `${protocol}//${window.location.host}/api/ws/asr`;
 }
 
 function asrConfigFromResponse(config: AsrConfigResponse): AsrConfig {
