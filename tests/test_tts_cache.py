@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock, Thread
 
 import numpy as np
 from omegaconf import OmegaConf
@@ -258,6 +259,102 @@ def test_qwen_serialized_prompt_payload_normalizes_omegaconf_ref_text(tmp_path):
     loaded = torch.load(prompt_path, map_location="cpu")
 
     assert loaded[0]["ref_text"] == "['hello', 'world']"
+
+
+class ControlledTtsCache(AbstractTtsCache):
+    driver_name = "controlled"
+    audio_extension = "wav"
+
+    def __init__(self, config: dict[str, object], boto_session: object, prefix: str = ""):
+        self.started: list[str] = []
+        self._release_events: dict[str, Event] = {}
+        self._started_events: dict[str, Event] = {}
+        self.fail_once: set[str] = set()
+        self.calls: dict[str, int] = {}
+        super().__init__(config, boto_session, prefix=prefix)
+        self.voice_id = "Controlled"
+
+    def add_gate(self, text: str) -> tuple[Event, Event]:
+        started = Event()
+        release = Event()
+        self._started_events[text] = started
+        self._release_events[text] = release
+        return started, release
+
+    def _synthesize_entry(
+        self,
+        text: str,
+        synthesis_text: str,
+    ) -> tuple[bytes, list[SpeechMark]]:
+        self.started.append(text)
+        self.calls[text] = self.calls.get(text, 0) + 1
+        started = self._started_events.get(text)
+        if started is not None:
+            started.set()
+        release = self._release_events.get(text)
+        if release is not None:
+            release.wait(timeout=5)
+        if text in self.fail_once and self.calls[text] == 1:
+            raise RuntimeError(f"boom:{text}")
+        return (
+            synthesis_text.encode("utf-8"),
+            [SpeechMark(time_ms=0, chunk_char_start=0, chunk_char_end=len(text))],
+        )
+
+
+def test_getitem_promotes_background_item_to_urgent(monkeypatch, tmp_path):
+    executor = ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr("agentic_editor.tss_cache._TTS_EXECUTOR", executor)
+
+    try:
+        cache = ControlledTtsCache({"cache_dir": str(tmp_path)}, boto_session=None)
+        first_started, first_release = cache.add_gate("first")
+        cache.add_gate("second")
+        urgent_started, urgent_release = cache.add_gate("urgent")
+
+        cache.submit("first")
+        assert first_started.wait(timeout=5)
+        cache.submit("second")
+        cache.submit("urgent")
+
+        result_holder: dict[str, tuple[bytes, list[SpeechMark]]] = {}
+
+        def load_urgent() -> None:
+            result_holder["urgent"] = cache["urgent"]
+
+        thread = Thread(target=load_urgent)
+        thread.start()
+        first_release.set()
+        assert urgent_started.wait(timeout=5)
+        urgent_release.set()
+        thread.join(timeout=5)
+
+        assert result_holder["urgent"][0] == b"urgent"
+        assert cache.started[:2] == ["first", "urgent"]
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
+def test_failed_item_is_dropped_and_retried(monkeypatch, tmp_path):
+    executor = ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr("agentic_editor.tss_cache._TTS_EXECUTOR", executor)
+
+    try:
+        cache = ControlledTtsCache({"cache_dir": str(tmp_path)}, boto_session=None)
+        cache.fail_once.add("retry")
+
+        with pytest.raises(RuntimeError, match="boom:retry"):
+            cache["retry"]
+
+        audio_bytes, speech_marks = cache["retry"]
+
+        assert audio_bytes == b"retry"
+        assert speech_marks == [
+            SpeechMark(time_ms=0, chunk_char_start=0, chunk_char_end=5)
+        ]
+        assert cache.calls["retry"] == 2
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def test_register_omegaconf_safe_globals_allows_torch_load(tmp_path):

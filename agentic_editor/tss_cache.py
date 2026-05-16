@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import deque
+from dataclasses import dataclass
 import hashlib
 import json
 import logging
@@ -7,6 +9,7 @@ import shlex
 from abc import ABC, abstractmethod
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+import threading
 from typing import List, Sequence
 import typing
 
@@ -20,6 +23,15 @@ _TTS_EXECUTOR = ThreadPoolExecutor(max_workers=6)
 def _speech_marks_to_records(marks: Sequence[SpeechMark]) -> List[dict]:
     """Serialize SpeechMark objects for JSON storage."""
     return [mark.model_dump() for mark in marks]
+
+
+@dataclass
+class _CacheEntry:
+    text: str
+    urgent: bool = False
+    state: str = "pending"
+    result: tuple[bytes, List[SpeechMark]] | None = None
+    exception: BaseException | None = None
 
 
 class AbstractTtsCache(ABC):
@@ -58,8 +70,20 @@ class AbstractTtsCache(ABC):
         self.session = boto_session
         self._cache: dict[
             str,
-            Future[tuple[bytes, List[SpeechMark]]] | tuple[bytes, List[SpeechMark]],
+            _CacheEntry | tuple[bytes, List[SpeechMark]],
         ] = {}
+        self._lock = threading.RLock()
+        self._work_available = threading.Condition(self._lock)
+        self._background_items: set[str] = set()
+        self._urgent_items: deque[str] = deque()
+        self._urgent_keys: set[str] = set()
+        self._running_workers = 0
+        self._scheduler_thread = threading.Thread(
+            target=self._scheduler_loop,
+            name=f"{self.__class__.__name__}-scheduler",
+            daemon=True,
+        )
+        self._scheduler_thread.start()
 
     def _get_config(self, key: str) -> object | None:
         prefixed_key = f"{self.prefix}{key}" if self.prefix else key
@@ -71,37 +95,41 @@ class AbstractTtsCache(ABC):
 
     def submit(self, text: str) -> None:
         key = self._key(text)
-        if key in self._cache:
-            return
-
         audio_path = self._audio_path(key)
         marks_path = self._marks_path(key)
         if audio_path.exists() and marks_path.exists():
             return
 
-        synthesis_text = self._prepare_text(text)
-        future = _TTS_EXECUTOR.submit(
-            self._synthesize_cache_entry,
-            text,
-            synthesis_text,
-            audio_path,
-            marks_path,
-        )
-        future.add_done_callback(
-            lambda fut, cache_key=key: self._handle_future_done(cache_key, fut)
-        )
-
-        self._cache[key] = future
+        with self._work_available:
+            entry = self._cache.get(key)
+            if entry is not None:
+                return
+            self._cache[key] = _CacheEntry(text=text)
+            self._background_items.add(key)
+            self._work_available.notify()
 
     def __getitem__(self, text: str) -> tuple[bytes, List[SpeechMark]]:
         key = self._key(text)
-        entry = self._cache.get(key)
         audio_path = self._audio_path(key)
         marks_path = self._marks_path(key)
+        entry: _CacheEntry | None = None
 
-        if entry is None:
-            self.submit(text)
-            entry = self._cache.get(key)
+        with self._work_available:
+            cached_entry = self._cache.get(key)
+            if isinstance(cached_entry, tuple):
+                return cached_entry
+            if isinstance(cached_entry, _CacheEntry):
+                entry = cached_entry
+                if entry.state == "pending" and not entry.urgent:
+                    entry.urgent = True
+                    self._background_items.discard(key)
+                    self._enqueue_urgent_locked(key)
+            elif audio_path.exists() and marks_path.exists():
+                pass
+            else:
+                entry = _CacheEntry(text=text, urgent=True)
+                self._cache[key] = entry
+                self._enqueue_urgent_locked(key)
 
         if entry is None:
             assert audio_path.exists() and marks_path.exists()
@@ -114,13 +142,18 @@ class AbstractTtsCache(ABC):
     def _resolve_cache_entry(
         self,
         cache_key: str,
-        entry: Future[tuple[bytes, List[SpeechMark]]] | tuple[bytes, List[SpeechMark]],
+        entry: _CacheEntry,
     ) -> tuple[bytes, List[SpeechMark]]:
-        if isinstance(entry, Future):
-            result = entry.result()
-            self._cache[cache_key] = result
-            return result
-        return entry
+        with self._lock:
+            while True:
+                current = self._cache.get(cache_key)
+                if isinstance(current, tuple):
+                    return current
+                if entry.result is not None:
+                    return entry.result
+                if entry.exception is not None:
+                    raise entry.exception
+                self._work_available.wait()
 
     def _prepare_text(self, text: str) -> str:
         if self.filter:
@@ -182,32 +215,99 @@ class AbstractTtsCache(ABC):
     def _synthesize_cache_entry(
         self,
         text: str,
-        synthesis_text: str,
         audio_path: Path,
         marks_path: Path,
     ) -> tuple[bytes, List[SpeechMark]]:
+        synthesis_text = self._prepare_text(text)
         audio_bytes, speech_marks = self._synthesize_entry(text, synthesis_text)
         audio_path.write_bytes(audio_bytes)
         self._write_speech_marks(marks_path, speech_marks)
         return audio_bytes, list(speech_marks)
 
+    def _scheduler_loop(self) -> None:
+        while True:
+            try:
+                self._dispatch_next_work_item()
+            except Exception:
+                logging.exception("TTS scheduler loop hit an unexpected error")
+
+    def _dispatch_next_work_item(self) -> None:
+        with self._work_available:
+            while True:
+                while (
+                    self._running_workers >= _TTS_EXECUTOR._max_workers
+                    or (not self._urgent_items and not self._background_items)
+                ):
+                    self._work_available.wait()
+                scheduled = self._get_next_pending_entry_locked()
+                if scheduled is not None:
+                    key, entry = scheduled
+                    entry.state = "running"
+                    self._running_workers += 1
+                    break
+        future = _TTS_EXECUTOR.submit(
+            self._synthesize_cache_entry,
+            entry.text,
+            self._audio_path(key),
+            self._marks_path(key),
+        )
+        future.add_done_callback(
+            lambda fut, cache_key=key, cache_entry=entry: self._handle_future_done(
+                cache_key,
+                cache_entry,
+                fut,
+            )
+        )
+
+    def _get_next_pending_entry_locked(self) -> tuple[str, _CacheEntry] | None:
+        while self._urgent_items:
+            key = self._urgent_items.popleft()
+            self._urgent_keys.discard(key)
+            entry = self._cache.get(key)
+            if isinstance(entry, _CacheEntry) and entry.state == "pending" and entry.urgent:
+                return key, entry
+        while self._background_items:
+            key = self._background_items.pop()
+            entry = self._cache.get(key)
+            if isinstance(entry, _CacheEntry) and entry.state == "pending" and not entry.urgent:
+                return key, entry
+        return None
+
+    def _enqueue_urgent_locked(self, key: str) -> None:
+        if key in self._urgent_keys:
+            return
+        self._urgent_keys.add(key)
+        self._urgent_items.append(key)
+        self._work_available.notify()
+
     def _handle_future_done(
         self,
         key: str,
+        entry: _CacheEntry,
         future: Future[tuple[bytes, List[SpeechMark]]],
     ) -> None:
         try:
-            exc = future.exception()
-        except Exception as err:
-            logging.error("TTS synthesis crashed for key %s: %s", key, err)
-            self._cache.pop(key, None)
+            result = future.result()
+        except Exception as exc:
+            logging.error("TTS synthesis failed for key %s: %s", key, exc)
+            with self._work_available:
+                self._running_workers -= 1
+                entry.exception = exc
+                entry.state = "failed"
+                cached_entry = self._cache.get(key)
+                if cached_entry is entry:
+                    self._cache.pop(key, None)
+                self._work_available.notify_all()
             return
 
-        if exc is None:
-            return
-
-        logging.error("TTS synthesis failed for key %s: %s", key, exc)
-        self._cache.pop(key, None)
+        with self._work_available:
+            self._running_workers -= 1
+            entry.result = result
+            entry.state = "done"
+            cached_entry = self._cache.get(key)
+            if cached_entry is entry:
+                self._cache[key] = result
+            self._work_available.notify_all()
 
     @abstractmethod
     def _synthesize_entry(
