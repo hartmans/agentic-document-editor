@@ -14,7 +14,7 @@ from langchain.chat_models import init_chat_model
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 _DEFAULT_MODEL_NAME = "openai:google/gemma-4-E4B-it"
-_DEFAULT_BASE_URL = "http://127.0.0.1:8000/"
+_DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
 _DEFAULT_API_KEY = "EMPTY"
 _DEFAULT_TEMPERATURE = 0.0
 _SAMPLE_RATE = 16000
