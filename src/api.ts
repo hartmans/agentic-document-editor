@@ -31,6 +31,7 @@ export interface DocumentResponse {
 }
 
 export interface ResumePoint {
+  documentId?: string;
   chunkId: number | null;
   offsetMs: number;
   docCharPosition?: number | null;
@@ -42,6 +43,7 @@ export interface MessageDict {
 }
 
 export interface InterruptionRequest {
+  documentId: string;
   chunk_id: number;
   elapsed_ms: number;
 }
@@ -64,6 +66,7 @@ export type AsrConfigResponse =
     };
 
 export interface InstructionsRequest {
+  baseDocumentId: string;
   messages: MessageDict[];
   instructions: string;
   resumePoint: ResumePoint;
@@ -73,12 +76,21 @@ export interface InstructionsResponse {
   messages: MessageDict[];
   resumePoint: ResumePoint;
   documentId: string;
+  document: DocumentResponse;
+  responseDocumentId: string;
+  responseDocument: DocumentResponse;
+}
+
+export class ApiError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+  }
 }
 
 async function handleJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Request failed (${res.status}): ${text}`);
+    throw new ApiError(res.status, `Request failed (${res.status}): ${text}`);
   }
   return res.json() as Promise<T>;
 }

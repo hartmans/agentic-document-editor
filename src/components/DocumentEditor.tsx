@@ -1,155 +1,226 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  ApiError,
   DocumentResponse,
-  InterruptionRequest,
   MessageDict,
-  fetchDocument,
   fetchStatus,
   postInstructions,
   postInterruption,
   ResumePoint,
 } from "../api";
 import { VoiceInput } from "./VoiceInput";
-import {
-  DocumentPlayback,
-  DocumentPlaybackHandle,
-} from "./DocumentPlayback";
-import {
-  instructionsSentUrl,
-  play} from "../audio/sounds";
+import { DocumentPlayback, DocumentPlaybackHandle } from "./DocumentPlayback";
+import { instructionsSentUrl, play } from "../audio/sounds";
+
+interface DocumentSnapshot {
+  documentId: string;
+  document: DocumentResponse;
+}
+
+interface ResponsePlayback extends DocumentSnapshot {
+  intent: number;
+}
 
 export function DocumentEditor() {
-  const [doc, setDoc] = useState<DocumentResponse | null>(null);
-  const [documentId, setDocumentId] = useState<string | null>(null);
-  const [responseDoc, setResponseDoc] = useState<DocumentResponse | null>(null);
-  const [responseDocumentId, setResponseDocumentId] = useState<string | null>(null);
-  const [statusText, setStatusText] = useState("");
+  const [snapshot, setSnapshot] = useState<DocumentSnapshot | null>(null);
+  const [response, setResponse] = useState<ResponsePlayback | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [instructionsPending, setInstructionsPending] = useState(false);
   const [voiceMode, setVoiceMode] = useState<"idle" | "armed" | "waiting">("idle");
   const [resumePoint, setResumePoint] = useState<ResumePoint | null>(null);
   const [messages, setMessages] = useState<MessageDict[]>([]);
   const playbackRef = useRef<DocumentPlaybackHandle | null>(null);
+  const responsePlaybackRef = useRef<DocumentPlaybackHandle | null>(null);
+  const mountedRef = useRef(false);
+  const instructionRef = useRef<object | null>(null);
+  const intentRef = useRef(0);
+  const startingRef = useRef(false);
+  const interruptionRef = useRef<Promise<ResumePoint> | null>(null);
 
   useEffect(() => {
-    (async () => {
-      try {
-        const status = await fetchStatus();
-        setDoc(status.document);
-        setDocumentId(status.documentId);
-        setStatusText(
-          `Voice ${status.voiceId}, chunks ${status.chunkCount}, strategy ${status.chunkingStrategy}`
-        );
-      } catch (err) {
-        setError((err as Error).message);
-      }
-    })();
-  }, [responseDocumentId]);
+    mountedRef.current = true;
+    let cancelled = false;
+    void fetchStatus().then((status) => {
+      if (!cancelled) setSnapshot(status);
+    }).catch((err: Error) => {
+      if (!cancelled) setError(err.message);
+    });
+    return () => {
+      cancelled = true;
+      mountedRef.current = false;
+      instructionRef.current = null;
+      intentRef.current += 1;
+    };
+  }, []);
+
+  const clearResponse = () => {
+    responsePlaybackRef.current?.stop();
+    setResponse(null);
+  };
 
   const handlePlay = async () => {
+    if (instructionRef.current || startingRef.current || playing) return;
+    const intent = ++intentRef.current;
+    startingRef.current = true;
+    setStarting(true);
+    clearResponse();
     try {
-      if (!playbackRef.current) {
-        setError("Playback not ready. Enable microphone and wait a moment.");
-        return;
-      }
+      // A preceding interruption may still be resolving its word position.
+      const resume = interruptionRef.current
+        ? await interruptionRef.current
+        : resumePoint;
+      if (!mountedRef.current || intent !== intentRef.current) return;
+      if (!playbackRef.current) throw new Error("Playback not ready. Enable microphone and wait a moment.");
       setVoiceMode("armed");
-      await playbackRef.current.play(resumePoint ?? undefined);
-      setPlaying(true);
+      await playbackRef.current.play(resume ?? undefined);
+      // The player reports actual starts. A cancelled play must not set playing.
     } catch (err) {
-      setError((err as Error).message);
+      if (mountedRef.current && intent === intentRef.current) setError((err as Error).message);
+    } finally {
+      if (mountedRef.current && intent === intentRef.current) {
+        startingRef.current = false;
+        setStarting(false);
+      }
     }
   };
 
+  function rememberInterruption(info: ResumePoint | undefined, intent: number) {
+    if (!snapshot || !info || info.chunkId == null) return;
+    const request = postInterruption({
+      documentId: snapshot.documentId,
+      chunk_id: info.chunkId,
+      elapsed_ms: info.offsetMs,
+    });
+    interruptionRef.current = request;
+    void request.then((point) => {
+      if (mountedRef.current && intent === intentRef.current) setResumePoint(point);
+    }).catch((err: Error) => {
+      if (mountedRef.current && intent === intentRef.current) setError(err.message);
+    });
+  }
+
   const handleStop = () => {
+    const intent = ++intentRef.current;
     const info = playbackRef.current?.stop();
-    if (info) {
-      setPlaying(false);
-      setResumePoint({
-        chunkId: info.chunkId ?? 0,
-        offsetMs: info.offsetMs,
-        docCharPosition: info.docCharPosition ?? undefined,
-      });
-    }
-    setResponseDoc(null);
-    setResponseDocumentId(null);
+    if (playing || startingRef.current) rememberInterruption(info, intent);
+    startingRef.current = false;
+    setStarting(false);
+    clearResponse();
     setVoiceMode("idle");
   };
 
   const handleInterrupt = () => {
+    if (instructionRef.current) return;
+    const intent = ++intentRef.current;
     const info = playbackRef.current?.stop();
-    if (!info || info.chunkId == null) return;
-    setResponseDoc(null);
-    setResponseDocumentId(null);
-    sendInterruption({
-      chunk_id: info.chunkId,
-      elapsed_ms: info.offsetMs,
-    });
+    if (playing || startingRef.current) rememberInterruption(info, intent);
+    startingRef.current = false;
+    setStarting(false);
+    clearResponse();
   };
-
-  async function sendInterruption(payload: InterruptionRequest) {
-    try {
-      const resp = await postInterruption(payload);
-      setPlaying(false);
-      setResumePoint(resp);
-    } catch (err) {
-      setError((err as Error).message);
-    }
-  }
 
   const handleInstructions = async (instructions: string) => {
+    if (instructionRef.current || !snapshot) return;
     const trimmed = instructions.trim();
-    if (!trimmed) {
-      setVoiceMode((prev) => (prev === "idle" ? prev : "armed"));
-      return;
-    }
-    const safeResumePoint = {
-      chunkId: resumePoint?.chunkId ?? 0,
-      offsetMs: resumePoint?.offsetMs ?? 0,
-      docCharPosition: resumePoint?.docCharPosition ?? 0,
-    };
+    if (!trimmed) return;
+    const operation = {};
+    instructionRef.current = operation;
+    const intent = intentRef.current;
+    const isCurrent = () => mountedRef.current && instructionRef.current === operation;
+    setInstructionsPending(true);
+    setVoiceMode("waiting");
+    setError(null);
     try {
-      setVoiceMode('waiting');
+      const point = interruptionRef.current ? await interruptionRef.current : resumePoint;
+      if (!isCurrent()) return;
       void play(instructionsSentUrl);
-      const resp = await postInstructions({
+      const result = await postInstructions({
+        baseDocumentId: snapshot.documentId,
         messages,
         instructions: trimmed,
-        resumePoint: safeResumePoint,
+        resumePoint: {
+          documentId: snapshot.documentId,
+          chunkId: point?.chunkId ?? 0,
+          offsetMs: point?.offsetMs ?? 0,
+          docCharPosition: point?.docCharPosition ?? 0,
+        },
       });
-      setMessages(resp.messages);
-      setResumePoint(resp.resumePoint);
-      setResponseDocumentId(resp.documentId);
-      const responseDocument = await fetchDocument(resp.documentId);
-      setResponseDoc(responseDocument);
-      playbackRef.current?.invalidateCache();
-      setVoiceMode((prev) => (prev === "waiting" ? "armed" : prev));
+      if (!isCurrent()) return;
+      // Install the revision and its resume point together; no status refetch.
+      setSnapshot({ documentId: result.documentId, document: result.document });
+      setMessages(result.messages);
+      setResumePoint(result.resumePoint);
+      interruptionRef.current = null;
+      if (intent === intentRef.current) {
+        setResponse({
+          documentId: result.responseDocumentId,
+          document: result.responseDocument,
+          intent,
+        });
+        setVoiceMode("armed");
+      }
     } catch (err) {
-      setError((err as Error).message);
-      setVoiceMode((prev) => (prev === "waiting" ? "armed" : prev));
+      if (!isCurrent()) return;
+      if (err instanceof ApiError && err.status === 409) {
+        // Another tab edited this revision. Refresh, but do not replay stale
+        // instructions or carry their conversation/position into the new text.
+        try {
+          const status = await fetchStatus();
+          if (!isCurrent()) return;
+          setSnapshot(status);
+          setResumePoint(null);
+          setMessages([]);
+          interruptionRef.current = null;
+          setError("The document changed in another session. Loaded the latest revision; please repeat your instruction.");
+        } catch (refreshError) {
+          if (isCurrent()) setError((refreshError as Error).message);
+        }
+        if (isCurrent()) setVoiceMode("idle");
+      } else {
+        setError((err as Error).message);
+        if (intent === intentRef.current) setVoiceMode("armed");
+      }
+    } finally {
+      if (isCurrent()) {
+        instructionRef.current = null;
+        setInstructionsPending(false);
+      }
     }
   };
 
-  if (!doc || !documentId) return <div>Loading document...</div>;
+  const handleResponseEnd = () => {
+    if (response && response.intent === intentRef.current) void handlePlay();
+  };
+
+  useEffect(() => {
+    // Reposition instructions can intentionally have no spoken response.
+    if (response && response.document.chunks.length === 0) handleResponseEnd();
+  }, [response]);
+
+  if (!snapshot) return <div>{error ?? "Loading document..."}</div>;
+  const { document: doc, documentId } = snapshot;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-      <div>{statusText}</div>
+      <div>{`Voice ${doc.voice_id}, chunks ${doc.chunks.length}, strategy ${doc.chunking_strategy}`}</div>
+      {instructionsPending && <div role="status">Processing instructions…</div>}
       <VoiceInput
-        enabled={voiceMode === "armed"}
+        enabled={voiceMode === "armed" && !instructionsPending}
         onInterrupt={handleInterrupt}
         onInstructions={handleInstructions}
       />
-      {responseDoc && responseDocumentId && (
+      {response && (
         <DocumentPlayback
+          ref={responsePlaybackRef}
           title="Response"
-          documentId={responseDocumentId}
-          documentText={responseDoc.document}
-          chunks={responseDoc.chunks}
+          documentId={response.documentId}
+          documentText={response.document.document}
+          chunks={response.document.chunks}
           autoPlay
-          onNaturalEnd={handlePlay}
-          key="response"
-          onPlayingChange={(isPlaying) => {
-            if (isPlaying) setVoiceMode((prev) => (prev === "idle" ? prev : "armed"));
-          }}
+          onNaturalEnd={handleResponseEnd}
+          key={`response/${response.documentId}/${response.intent}`}
         />
       )}
       <DocumentPlayback
@@ -158,20 +229,17 @@ export function DocumentEditor() {
         documentId={documentId}
         documentText={doc.document}
         chunks={doc.chunks}
-        key="original"
-        onPlayingChange={(isPlaying) => {
-          setPlaying(isPlaying);
-          if (isPlaying) setVoiceMode((prev) => (prev === "idle" ? prev : "armed"));
-        }}
+        key={documentId}
+        onPlayingChange={setPlaying}
       />
       <div style={{ display: "flex", gap: "0.5rem" }}>
-        <button onClick={handlePlay} disabled={playing}>
+        <button onClick={handlePlay} disabled={playing || starting || instructionsPending}>
           Play
         </button>
-        <button onClick={handleStop} disabled={voiceMode !== "armed"}>
+        <button onClick={handleStop} disabled={voiceMode === "idle" && !starting && !response}>
           Stop
         </button>
-        <button onClick={handlePlay} disabled={!resumePoint || playing}>
+        <button onClick={handlePlay} disabled={!resumePoint || playing || starting || instructionsPending}>
           Continue
         </button>
       </div>

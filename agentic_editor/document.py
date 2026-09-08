@@ -85,6 +85,7 @@ class ResumePoint(BaseModel):
     chunkId: int
     offsetMs: int
     docCharPosition: int
+    documentId: str | None = None
 
 
 @dataclass

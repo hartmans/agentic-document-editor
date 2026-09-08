@@ -1,5 +1,6 @@
 import boto3
-import hashlib
+import asyncio
+import httpx
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
@@ -46,19 +47,15 @@ def test_chunking_and_mapping(document_state):
     assert mapping["docCharPosition"] == first.doc_char_start
 
 
-def _sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
 def test_api_endpoints(document_state, sample_document):
     path, _doc_text = sample_document
-    document_id = _sha256_text(str(path.resolve()))
     app = backend.create_app(document_state, path, config={"region_name": "us-east-1"})
     client = TestClient(app)
 
     status_resp = client.get("/status")
     assert status_resp.status_code == 200
     status_data = status_resp.json()
+    document_id = status_data["documentId"]
     assert status_data["chunkCount"] == 1
     assert status_data["document"]["chunks"][0]["chunk_id"] == 0
 
@@ -71,11 +68,88 @@ def test_api_endpoints(document_state, sample_document):
     assert audio_resp.status_code == 200
     assert audio_resp.content  # audio bytes present
 
-    interrupt_resp = client.post("/interruptions", json={"chunk_id": 0, "elapsed_ms": 0})
+    interrupt_resp = client.post("/interruptions", json={
+        "documentId": document_id, "chunk_id": 0, "elapsed_ms": 0,
+    })
     assert interrupt_resp.status_code == 200
     interrupt = interrupt_resp.json()
     assert interrupt["chunkId"] == 0
     assert interrupt["docCharPosition"] >= 0
+    assert interrupt["documentId"] == document_id
+
+
+def test_historical_revision_audio_and_interruption(document_state, sample_document):
+    path, _ = sample_document
+    app = backend.create_app(document_state, path, config={})
+    client = TestClient(app)
+    original_id = client.get("/status").json()["documentId"]
+    # Install another real document snapshot while keeping the original revision.
+    updated = build_document_state(
+        "A replacement document.", tts_cache=document_state.tts_cache,
+    )
+    app.state.documents["updated-revision"] = updated
+    app.state.document_state = updated
+    app.state.document_id = "updated-revision"
+
+    assert client.get("/status").json()["documentId"] == "updated-revision"
+    old_document = client.get(f"/document/{original_id}").json()
+    assert old_document["document"] == document_state.document
+    audio = client.get(f"/chunks/{original_id}/0/audio")
+    assert audio.status_code == 200
+    assert audio.content == document_state.tts_cache[document_state.chunks[0].text][0]
+    point = client.post("/interruptions", json={
+        "documentId": original_id, "chunk_id": 0, "elapsed_ms": 1000,
+    })
+    expected = map_elapsed_time_to_document(
+        document_state.tts_cache, document_state.chunks[0], 0, 1000,
+    )
+    assert point.status_code == 200
+    assert point.json() == {**expected, "documentId": original_id}
+
+
+def test_instructions_recheck_revision_after_waiting(document_state, sample_document):
+    path, _ = sample_document
+    app = backend.create_app(document_state, path, config={})
+    original_id = app.state.document_id
+
+    async def exercise():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            # Represent an edit currently holding the lock while awaiting its
+            # model. A second request must wait, then check the published revision.
+            async with app.state.instructions_lock:
+                request = asyncio.create_task(client.post("/instructions", json={
+                    "baseDocumentId": original_id,
+                    "instructions": "Continue reading",
+                    "resumePoint": {
+                        "documentId": original_id,
+                        "chunkId": 0, "offsetMs": 0, "docCharPosition": 0,
+                    },
+                }))
+                done, _ = await asyncio.wait({request}, timeout=0.05)
+                assert not done
+                app.state.document_id = "newer-revision"
+            response = await asyncio.wait_for(request, timeout=5)
+            assert response.status_code == 409
+            assert app.state.document_id == "newer-revision"
+
+    asyncio.run(exercise())
+
+
+def test_instructions_reject_resume_from_another_revision(document_state, sample_document):
+    path, _ = sample_document
+    app = backend.create_app(document_state, path, config={})
+    client = TestClient(app)
+    response = client.post("/instructions", json={
+        "baseDocumentId": app.state.document_id,
+        "instructions": "Continue reading",
+        "resumePoint": {
+            "documentId": "old-revision",
+            "chunkId": 0, "offsetMs": 0, "docCharPosition": 0,
+        },
+    })
+    assert response.status_code == 409
 
 
 def test_asr_endpoint_aws(document_state, sample_document):

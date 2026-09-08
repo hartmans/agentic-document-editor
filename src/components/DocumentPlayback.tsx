@@ -1,6 +1,8 @@
 import {
   useContext,
   useEffect,
+  useEffectEvent,
+  useLayoutEffect,
   useImperativeHandle,
   useMemo,
   useRef,
@@ -20,7 +22,6 @@ export interface ChunkRef {
 export interface DocumentPlaybackHandle {
   play: (resume?: ResumePoint) => Promise<void>;
   stop: () => ResumePoint;
-  invalidateCache: () => void;
 }
 
 let globalComponentNumber = 0;
@@ -47,44 +48,48 @@ export function DocumentPlayback({
 }: Props & { ref?: Ref<DocumentPlaybackHandle> }) {
     const { audioContext } = useContext(AudioCtx);
     const audioEngineRef = useRef<AudioEngine | null>(null);
-    const buffersRef = useRef<Map<number, AudioBuffer>>(new Map());
+    const buffersRef = useRef<Map<string, AudioBuffer>>(new Map());
+    const generationRef = useRef(0);
+    const pendingStartRef = useRef<ResumePoint | null>(null);
     const [currentChunkId, setCurrentChunkId] = useState<number | null>(null);
     const [highlightStart, setHighlightStart] = useState<number | null>(null);
     const playingRef = useRef(false);
     const componentNumber = useMemo(() => {return ++globalComponentNumber}, []);
 
-    useEffect(() => {
+    const emitNaturalEnd = useEffectEvent(() => onNaturalEnd?.());
+
+    useLayoutEffect(() => {
       if (audioContext) {
         audioEngineRef.current = new AudioEngine(audioContext);
       }
-    }, [audioContext]);
-
-    useEffect(() => {
       return () => {
+        generationRef.current += 1;
+        pendingStartRef.current = null;
         playingRef.current = false;
         audioEngineRef.current?.stop();
         audioEngineRef.current = null;
         console.log('DocumentPlayback cleanup', {componentNumber});
       };
-    }, []);
+    }, [audioContext, documentId]);
 
     async function loadBuffer(chunkId: number): Promise<AudioBuffer> {
-      const cached = buffersRef.current.get(chunkId);
+      const key = `${documentId}/${chunkId}`;
+      const cached = buffersRef.current.get(key);
       if (cached) return cached;
       if (!audioContext) throw new Error("AudioContext not ready");
       const data = await fetchChunkAudio(documentId, chunkId);
       const buf = await audioContext.decodeAudioData(data.slice(0));
-      buffersRef.current.set(chunkId, buf);
+      buffersRef.current.set(key, buf);
       return buf;
     }
 
-  const invalidateCache = () => {
-buffersRef.current.clear();
-    }
-
-    async function startChunk(chunkId: number, offsetMs = 0, docCharPosition?: number | null) {
+    async function startChunk(chunkId: number, offsetMs = 0, docCharPosition?: number | null,
+                              generation = generationRef.current) {
       if (!audioEngineRef.current || !audioContext) return;
+      pendingStartRef.current = { documentId, chunkId, offsetMs, docCharPosition };
       const buffer = await loadBuffer(chunkId);
+      if (generation !== generationRef.current) return;
+      pendingStartRef.current = null;
         const chunk = chunks[chunkId];
         if (playingRef.current) {
             console.error('StartChunk but already playing');
@@ -98,8 +103,9 @@ buffersRef.current.clear();
       if (!audioEngineRef.current)
         return;
       audioEngineRef.current.playChunk(chunkId, buffer, offsetMs / 1000, () => {
+          if (generation !== generationRef.current) return;
           playingRef.current = false;
-          handleNaturalEnd(chunkId);
+          handleNaturalEnd(chunkId, generation);
           
       });
       playingRef.current = true;
@@ -107,42 +113,49 @@ buffersRef.current.clear();
       onPlayingChange?.(true);
     }
 
-    function handleNaturalEnd(finishedId: number) {
+    function handleNaturalEnd(finishedId: number, generation: number) {
       const nextId = finishedId + 1;
       if (nextId < chunks.length) {
-        startChunk(nextId, 0, chunks[nextId].doc_char_start);
+        startChunk(nextId, 0, chunks[nextId].doc_char_start, generation);
       } else {
         playingRef.current = false;
         onPlayingChange?.(false);
-        onNaturalEnd?.();
+        emitNaturalEnd();
       }
     }
 
     function stopPlayback(): ResumePoint {
       const info = audioEngineRef.current?.getCurrentPlaybackInfo();
+      const pending = pendingStartRef.current;
+      generationRef.current += 1;
+      pendingStartRef.current = null;
       playingRef.current = false;
       audioEngineRef.current?.stop();
       const offsetMs =
         info && info.chunkStartTime != null
           ? Math.round((info.contextCurrentTime - info.chunkStartTime) * 1000)
-          : 0;
-      const chunkId = info?.playingChunkId ?? currentChunkId;
-      const docCharPosition = null;
+          : pending?.offsetMs ?? 0;
+      const chunkId = info?.playingChunkId ?? pending?.chunkId ?? currentChunkId;
+      const docCharPosition = pending?.docCharPosition ?? null;
       onPlayingChange?.(false);
-      return { chunkId, offsetMs, docCharPosition };
+      return { documentId, chunkId, offsetMs, docCharPosition };
     }
 
     useImperativeHandle(ref, () => ({
       play: async (resume?: ResumePoint | null) => {
+        if (playingRef.current) return;
+        if (resume?.documentId && resume.documentId !== documentId) {
+          throw new Error("Resume point belongs to another document revision");
+        }
+        const generation = ++generationRef.current;
         const targetChunk = resume?.chunkId ?? 0;
         const offset = resume?.offsetMs ?? 0;
         const docPos =
           resume?.docCharPosition ??
           (targetChunk < chunks.length ? chunks[targetChunk].doc_char_start : undefined);
-        await startChunk(targetChunk, offset, docPos);
+        await startChunk(targetChunk, offset, docPos, generation);
       },
       stop: () => stopPlayback(),
-      invalidateCache: invalidateCache,
     }));
 
     useEffect(() => {
@@ -150,8 +163,9 @@ buffersRef.current.clear();
       if (!audioContext) return;
       if (!chunks.length) return;
       console.log('DocumentPlayback autoplay', {componentNumber});
-      void startChunk(0, 0, chunks[0].doc_char_start);
-    }, [autoPlay, audioContext, chunks]);
+      const generation = ++generationRef.current;
+      void startChunk(0, 0, chunks[0].doc_char_start, generation);
+    }, [autoPlay, audioContext, chunks, documentId]);
 
     const renderedText = useMemo(() => {
       if (!documentText) return "Loading document...";

@@ -27,6 +27,8 @@ export class AudioEngine {
     source.buffer = buffer;
     source.connect(this.audioContext.destination);
     source.onended = () => {
+      // A stopped source can deliver its ended event after a new source starts.
+      if (this.sourceNode !== source) return;
       this.sourceNode = null;
       this.playingChunkId = null;
       this.chunkStartTime = null;

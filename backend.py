@@ -7,12 +7,14 @@ interruption-to-text mapping.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import logging
 from pathlib import Path
 from typing import Dict, List, Literal
 import typing
+from uuid import uuid4
 
 from agentic_editor.document import (
     DocumentState,
@@ -59,11 +61,13 @@ class DocumentResponseModel(BaseModel):
 
 
 class InterruptionRequest(BaseModel):
+    documentId: str
     chunk_id: int
     elapsed_ms: int = Field(..., ge=0)
 
 
 class InstructionsRequest(BaseModel):
+    baseDocumentId: str
     messages: List[dict] = Field(default_factory=list)
     instructions: str
     resumePoint: ResumePoint
@@ -73,6 +77,9 @@ class InstructionsResponse(BaseModel):
     messages: List[dict]
     resumePoint: ResumePoint
     documentId: str
+    document: DocumentResponseModel
+    responseDocumentId: str
+    responseDocument: DocumentResponseModel
 
 
 class AwsStsTokenResponse(BaseModel):
@@ -179,12 +186,13 @@ def create_app(
     config: dict[str, typing.Any],
     asr_receiver: object | None = None,
 ) -> FastAPI:
-    document_id = _sha256_text(str(document_path.resolve()))
+    document_id = uuid4().hex
     app = FastAPI(title="Agentic Document TTS Server")
     app.state.document_state = state
     app.state.document_id = document_id
     app.state.document_path = document_path
     app.state.documents  = {document_id: state}
+    app.state.instructions_lock = asyncio.Lock()
     app.state.graph = build_graph(config)
     app.state.asr_type = _resolve_asr_type(config)
     app.state.asr_region_name = str(config["region_name"]) if config.get("region_name") else None
@@ -200,7 +208,7 @@ def create_app(
     )
 
     @app.get("/status")
-    def status():
+    async def status():
         document_state = app.state.document_state
         document_response = _build_document_response(document_state).dict()
         return {
@@ -252,7 +260,9 @@ def create_app(
 
     @app.post("/interruptions", response_model=ResumePoint)
     def map_interruption(request: InterruptionRequest):
-        document_state = app.state.document_state
+        document_state = app.state.documents.get(request.documentId)
+        if document_state is None:
+            raise HTTPException(status_code=404, detail="Unknown document revision")
         try:
             chunk = document_state.chunks[request.chunk_id]
         except IndexError:
@@ -263,10 +273,18 @@ def create_app(
             request.chunk_id,
             request.elapsed_ms,
         )
-        return ResumePoint(**mapping)
+        return ResumePoint(**mapping, documentId=request.documentId)
 
     @app.post("/instructions", response_model=InstructionsResponse)
     async def handle_instructions(request: InstructionsRequest):
+        async with app.state.instructions_lock:
+            if request.baseDocumentId != app.state.document_id:
+                raise HTTPException(status_code=409, detail="Document changed; reload before submitting instructions")
+            if request.resumePoint.documentId not in (None, request.baseDocumentId):
+                raise HTTPException(status_code=409, detail="Resume point belongs to another document revision")
+            return await process_instructions(request)
+
+    async def process_instructions(request: InstructionsRequest):
         document_state = app.state.document_state
         resume_point = request.resumePoint
         messages: list[BaseMessage]
@@ -292,30 +310,48 @@ def create_app(
             response_message = output_state.messages[-1]
         else:
             raise RuntimeError('No AI response')
-        app.state.document_state = output_state.document_state
-        app.state.documents[app.state.document_id] = output_state.document_state
+        updated_state = output_state.document_state
+        if updated_state is None:
+            raise RuntimeError("No document state returned")
+        updated_document_id = (
+            uuid4().hex if updated_state.document != document_state.document
+            else app.state.document_id
+        )
         response_text = response_message.content # pyright: ignore[reportPossiblyUnboundVariable]
         if not isinstance(response_text, str):
             response_text = json.dumps(response_text, ensure_ascii=True)
-        response_document_id = _sha256_text(response_text)
+        response_document_id = "response-" + _sha256_text(response_text)
         response_document_state = build_document_state(
             document_text=response_text,
             tts_cache=document_state.tts_cache,
             session=document_state.aws_session,
         )
-        app.state.documents[response_document_id] = response_document_state
-        if output_state.position:
-            updated_resume_point = map_doc_char_to_offset(
-                app.state.document_state, # type: ignore
-                output_state.position 
+        if output_state.position is not None:
+            updated_resume_point = await run_in_threadpool(
+                map_doc_char_to_offset,
+                updated_state,
+                output_state.position,
             )
         else: updated_resume_point = resume_point
-        if app.state.document_state:
-            app.state.document_path.write_text(app.state.document_state.document)
+        updated_resume_point = updated_resume_point.model_copy(
+            update={"documentId": updated_document_id}
+        )
+        await run_in_threadpool(
+            app.state.document_path.write_text, updated_state.document, encoding="utf-8"
+        )
+        # Publish together without an await. Old revisions remain addressable by
+        # outstanding audio and interruption requests.
+        app.state.documents[updated_document_id] = updated_state
+        app.state.documents[response_document_id] = response_document_state
+        app.state.document_state = updated_state
+        app.state.document_id = updated_document_id
         return InstructionsResponse(
             messages=messages_to_dict(output_state.messages),
             resumePoint=updated_resume_point,
-            documentId=response_document_id,
+            documentId=updated_document_id,
+            document=_build_document_response(updated_state),
+            responseDocumentId=response_document_id,
+            responseDocument=_build_document_response(response_document_state),
         )
 
     if app.state.asr_type == "gemma4":
