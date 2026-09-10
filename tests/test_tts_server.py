@@ -225,6 +225,19 @@ def test_asr_websocket_returns_transcription(document_state, sample_document):
         assert result["instructions"] == "replace hello with hi"
 
 
+def test_create_app_stores_gemma4_debug_dir(document_state, sample_document, tmp_path):
+    path, _doc_text = sample_document
+
+    app = backend.create_app(
+        document_state,
+        path,
+        config={},
+        gemma4_debug_audio_dir=tmp_path / "logs",
+    )
+
+    assert app.state.gemma4_debug_audio_dir == tmp_path / "logs"
+
+
 def test_chunk_marks_are_revision_scoped_document_positions(document_state, sample_document):
     from agentic_editor.document import DocumentState, TextChunk
 

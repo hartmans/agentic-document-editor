@@ -94,6 +94,75 @@ def test_qwen_splits_text_into_paragraph_segments():
     ]
 
 
+def test_reconcile_speech_marks_maps_filtered_tokens_back_to_original_text(tmp_path):
+    cache = DummyTtsCache({"cache_dir": str(tmp_path)}, boto_session=None)
+
+    marks = cache._reconcile_speech_marks(
+        "Hello *world*",
+        "Hello world",
+        [
+            {"type": "word", "text": "Hello", "time_ms": 0},
+            {"type": "word", "text": "world", "time_ms": 100},
+        ],
+    )
+
+    assert marks == [
+        SpeechMark(time_ms=0, chunk_char_start=0, chunk_char_end=5),
+        SpeechMark(time_ms=100, chunk_char_start=7, chunk_char_end=12),
+    ]
+
+
+def test_reconcile_speech_marks_handles_filter_word_changes(tmp_path):
+    cache = DummyTtsCache({"cache_dir": str(tmp_path)}, boto_session=None)
+
+    marks = cache._reconcile_speech_marks(
+        "Mr. Jones",
+        "Mister Jones",
+        [
+            {"type": "word", "text": "Mister", "time_ms": 0},
+            {"type": "word", "text": "Jones", "time_ms": 120},
+        ],
+    )
+
+    assert marks == [
+        SpeechMark(time_ms=0, chunk_char_start=0, chunk_char_end=2),
+        SpeechMark(time_ms=120, chunk_char_start=4, chunk_char_end=9),
+    ]
+
+
+def test_qwen_synthesize_entry_reconciles_marks_against_original_text(monkeypatch):
+    cache = object.__new__(QwenTtsCache)
+    cache._prompt_items_for_voice = lambda: [object()]
+    cache._generate_audio = lambda synthesis_text, prompt_items: (
+        np.zeros(1, dtype="float32"),
+        24000,
+    )
+    expected_marks = [SpeechMark(time_ms=0, chunk_char_start=3, chunk_char_end=8)]
+    seen: dict[str, object] = {}
+
+    def fake_align(text, synthesis_text, audio, sample_rate):
+        seen["text"] = text
+        seen["synthesis_text"] = synthesis_text
+        seen["sample_rate"] = sample_rate
+        return expected_marks
+
+    cache._align_speech_marks = fake_align
+    cache._encode_mp3 = lambda audio, sample_rate: b"mp3"
+
+    audio_bytes, speech_marks = cache._synthesize_entry(
+        "Mr. Jones",
+        "Mister Jones",
+    )
+
+    assert audio_bytes == b"mp3"
+    assert speech_marks == expected_marks
+    assert seen == {
+        "text": "Mr. Jones",
+        "synthesis_text": "Mister Jones",
+        "sample_rate": 24000,
+    }
+
+
 @pytest.mark.xfail(
     QWEN_TTS_BATCH_SIZE == 1,
     reason="Qwen paragraph synthesis should support batching again",
@@ -315,10 +384,9 @@ class ControlledTtsCache(AbstractTtsCache):
 
 def test_getitem_promotes_background_item_to_urgent(monkeypatch, tmp_path):
     executor = ThreadPoolExecutor(max_workers=1)
-    monkeypatch.setattr("agentic_editor.tss_cache._TTS_EXECUTOR", executor)
-
     try:
         cache = ControlledTtsCache({"cache_dir": str(tmp_path)}, boto_session=None)
+        monkeypatch.setattr(cache, "_tts_executor", executor)
         first_started, first_release = cache.add_gate("first")
         cache.add_gate("second")
         urgent_started, urgent_release = cache.add_gate("urgent")
@@ -348,10 +416,9 @@ def test_getitem_promotes_background_item_to_urgent(monkeypatch, tmp_path):
 
 def test_background_submission_order_is_preserved(monkeypatch, tmp_path):
     executor = ThreadPoolExecutor(max_workers=1)
-    monkeypatch.setattr("agentic_editor.tss_cache._TTS_EXECUTOR", executor)
-
     try:
         cache = ControlledTtsCache({"cache_dir": str(tmp_path)}, boto_session=None)
+        monkeypatch.setattr(cache, "_tts_executor", executor)
         first_started, first_release = cache.add_gate("first")
         second_started, second_release = cache.add_gate("second")
         third_started, third_release = cache.add_gate("third")
@@ -374,10 +441,9 @@ def test_background_submission_order_is_preserved(monkeypatch, tmp_path):
 
 def test_failed_item_is_dropped_and_retried(monkeypatch, tmp_path):
     executor = ThreadPoolExecutor(max_workers=1)
-    monkeypatch.setattr("agentic_editor.tss_cache._TTS_EXECUTOR", executor)
-
     try:
         cache = ControlledTtsCache({"cache_dir": str(tmp_path)}, boto_session=None)
+        monkeypatch.setattr(cache, "_tts_executor", executor)
         cache.fail_once.add("retry")
 
         with pytest.raises(RuntimeError, match="boom:retry"):

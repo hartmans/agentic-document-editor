@@ -1,6 +1,8 @@
 import base64
+import wave
 
 import numpy as np
+from pathlib import Path
 
 from agentic_editor.gemma4 import Gemma4AsrReceiver
 from langchain_core.messages import AIMessage
@@ -106,6 +108,34 @@ def test_gemma4_defaults_to_local_vllm_openai_adapter(monkeypatch):
     assert result == "Change Gemma to Gemma 4."
     assert captured_init_kwargs["model"] == "google/gemma-4-E4B-it"
     assert captured_init_kwargs["model_provider"] == "openai"
-    assert captured_init_kwargs["base_url"] == "http://127.0.0.1:8000/"
+    assert captured_init_kwargs["base_url"] == "http://127.0.0.1:8000/v1"
     assert captured_init_kwargs["api_key"] == "EMPTY"
     assert captured_init_kwargs["temperature"] == 0.0
+
+
+def test_gemma4_writes_debug_audio_fragments(monkeypatch, tmp_path):
+    class MinimalChatModel:
+        def invoke(self, messages, **kwargs):
+            if len(messages) == 2:
+                return AIMessage(content="Names: Gemma.")
+            return AIMessage(content="Change Gemma to Gemma 4.")
+
+    monkeypatch.setattr(
+        "agentic_editor.gemma4.init_chat_model",
+        lambda **kwargs: MinimalChatModel(),
+    )
+
+    debug_dir = tmp_path / "logs"
+    receiver = Gemma4AsrReceiver({}, debug_audio_dir=debug_dir)
+    receiver.transcribe_audio(
+        np.array([0.0, 0.25, -0.25, 0.5], dtype=np.float32),
+        document="Gemma",
+    )
+
+    outputs = sorted(debug_dir.glob("gemma4_fragment_*.wav"))
+    assert len(outputs) == 1
+    with wave.open(str(outputs[0]), "rb") as wav_file:
+        assert wav_file.getframerate() == receiver.sample_rate
+        assert wav_file.getnchannels() == 1
+        assert wav_file.getsampwidth() == 2
+        assert wav_file.getnframes() == 4
