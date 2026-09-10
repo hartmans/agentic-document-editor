@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .speech_marks import SpeechMark
 from .tts_cache import TtsCache
@@ -79,6 +79,11 @@ class TextChunk:
     doc_char_start: int
     doc_char_end: int
     audio_mime_type: str = "audio/mpeg"
+
+
+class CharacterResumePoint(BaseModel):
+    docCharPosition: int = Field(ge=0)
+    documentId: str | None = None
 
 
 class ResumePoint(BaseModel):

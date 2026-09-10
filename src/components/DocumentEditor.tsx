@@ -5,7 +5,6 @@ import {
   MessageDict,
   fetchStatus,
   postInstructions,
-  postInterruption,
   ResumePoint,
 } from "../api";
 import { VoiceInput } from "./VoiceInput";
@@ -37,7 +36,7 @@ export function DocumentEditor() {
   const instructionRef = useRef<object | null>(null);
   const intentRef = useRef(0);
   const startingRef = useRef(false);
-  const interruptionRef = useRef<Promise<ResumePoint> | null>(null);
+  const resumePointRef = useRef<ResumePoint | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -67,10 +66,7 @@ export function DocumentEditor() {
     setStarting(true);
     clearResponse();
     try {
-      // A preceding interruption may still be resolving its word position.
-      const resume = interruptionRef.current
-        ? await interruptionRef.current
-        : resumePoint;
+      const resume = resumePointRef.current;
       if (!mountedRef.current || intent !== intentRef.current) return;
       if (!playbackRef.current) throw new Error("Playback not ready. Enable microphone and wait a moment.");
       setVoiceMode("armed");
@@ -87,18 +83,11 @@ export function DocumentEditor() {
   };
 
   function rememberInterruption(info: ResumePoint | undefined, intent: number) {
-    if (!snapshot || !info || info.chunkId == null) return;
-    const request = postInterruption({
-      documentId: snapshot.documentId,
-      chunk_id: info.chunkId,
-      elapsed_ms: info.offsetMs,
-    });
-    interruptionRef.current = request;
-    void request.then((point) => {
-      if (mountedRef.current && intent === intentRef.current) setResumePoint(point);
-    }).catch((err: Error) => {
-      if (mountedRef.current && intent === intentRef.current) setError(err.message);
-    });
+    if (!snapshot || !info || info.documentId !== snapshot.documentId) return;
+    if (mountedRef.current && intent === intentRef.current) {
+      resumePointRef.current = info;
+      setResumePoint(info);
+    }
   }
 
   const handleStop = () => {
@@ -133,7 +122,7 @@ export function DocumentEditor() {
     setVoiceMode("waiting");
     setError(null);
     try {
-      const point = interruptionRef.current ? await interruptionRef.current : resumePoint;
+      const point = resumePointRef.current;
       if (!isCurrent()) return;
       void play(instructionsSentUrl);
       const result = await postInstructions({
@@ -142,8 +131,6 @@ export function DocumentEditor() {
         instructions: trimmed,
         resumePoint: {
           documentId: snapshot.documentId,
-          chunkId: point?.chunkId ?? 0,
-          offsetMs: point?.offsetMs ?? 0,
           docCharPosition: point?.docCharPosition ?? 0,
         },
       });
@@ -152,7 +139,7 @@ export function DocumentEditor() {
       setSnapshot({ documentId: result.documentId, document: result.document });
       setMessages(result.messages);
       setResumePoint(result.resumePoint);
-      interruptionRef.current = null;
+      resumePointRef.current = result.resumePoint;
       if (intent === intentRef.current) {
         setResponse({
           documentId: result.responseDocumentId,
@@ -172,7 +159,7 @@ export function DocumentEditor() {
           setSnapshot(status);
           setResumePoint(null);
           setMessages([]);
-          interruptionRef.current = null;
+          resumePointRef.current = null;
           setError("The document changed in another session. Loaded the latest revision; please repeat your instruction.");
         } catch (refreshError) {
           if (isCurrent()) setError((refreshError as Error).message);

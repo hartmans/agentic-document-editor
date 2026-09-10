@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from agentic_editor.document import (
     DocumentState,
+    CharacterResumePoint,
     ResumePoint,
     apply_document_update,
     load_document,
@@ -26,7 +27,6 @@ from agentic_editor.graph import GraphState, build_graph
 from agentic_editor.tts import (
     build_document_state,
     submit_document_audio,
-    map_doc_char_to_offset,
     map_elapsed_time_to_document,
 )
 from fastapi import FastAPI, HTTPException, WebSocket
@@ -61,6 +61,18 @@ class DocumentResponseModel(BaseModel):
     chunking_strategy: str
 
 
+class WordMarkModel(BaseModel):
+    timeMs: int
+    docCharStart: int
+    docCharEnd: int
+
+
+class ChunkMarksResponse(BaseModel):
+    documentId: str
+    chunkId: int
+    marks: List[WordMarkModel]
+
+
 class InterruptionRequest(BaseModel):
     documentId: str
     chunk_id: int
@@ -71,12 +83,12 @@ class InstructionsRequest(BaseModel):
     baseDocumentId: str
     messages: List[dict] = Field(default_factory=list)
     instructions: str
-    resumePoint: ResumePoint
+    resumePoint: CharacterResumePoint
 
 
 class InstructionsResponse(BaseModel):
     messages: List[dict]
-    resumePoint: ResumePoint
+    resumePoint: CharacterResumePoint
     documentId: str
     document: DocumentResponseModel
     responseDocumentId: str
@@ -259,6 +271,29 @@ def create_app(
             raise HTTPException(status_code=500, detail="Failed to synthesize audio")
         return Response(content=audio_bytes, media_type=chunk.audio_mime_type)
 
+    @app.get("/chunks/{document_id}/{chunk_id}/marks", response_model=ChunkMarksResponse)
+    def get_chunk_marks(document_id: str, chunk_id: int):
+        document_state = app.state.documents.get(document_id)
+        if document_state is None:
+            raise HTTPException(status_code=404, detail="Unknown document_id")
+        if chunk_id < 0 or chunk_id >= len(document_state.chunks):
+            raise HTTPException(status_code=404, detail="Unknown chunk_id")
+        chunk = document_state.chunks[chunk_id]
+        try:
+            _, marks = document_state.tts_cache[chunk.text]
+        except Exception as exc:
+            logging.error("Failed to load marks for chunk %s: %s", chunk_id, exc)
+            raise HTTPException(status_code=500, detail="Failed to synthesize audio")
+        return ChunkMarksResponse(
+            documentId=document_id,
+            chunkId=chunk_id,
+            marks=[WordMarkModel(
+                timeMs=mark.time_ms,
+                docCharStart=chunk.doc_char_start + mark.chunk_char_start,
+                docCharEnd=chunk.doc_char_start + mark.chunk_char_end,
+            ) for mark in marks],
+        )
+
     @app.post("/interruptions", response_model=ResumePoint)
     def map_interruption(request: InterruptionRequest):
         document_state = app.state.documents.get(request.documentId)
@@ -298,8 +333,7 @@ def create_app(
         graph_state = GraphState(
             document_state=document_state,
             position=resume_point.docCharPosition,
-            chunk_id=resume_point.chunkId,
-            elapsed_ms=resume_point.offsetMs,
+            chunk_id=document_state.find_chunk_id(resume_point.docCharPosition),
             messages=messages,
         )
         result = await app.state.graph.ainvoke(graph_state)
@@ -334,15 +368,11 @@ def create_app(
                            else resume_point.docCharPosition),
             response_state=response_document_state,
         )
-        if output_state.position is not None:
-            updated_resume_point = await run_in_threadpool(
-                map_doc_char_to_offset,
-                updated_state,
-                output_state.position,
-            )
-        else: updated_resume_point = resume_point
-        updated_resume_point = updated_resume_point.model_copy(
-            update={"documentId": updated_document_id}
+        position = (output_state.position if output_state.position is not None
+                    else resume_point.docCharPosition)
+        updated_resume_point = CharacterResumePoint(
+            docCharPosition=max(0, min(position, len(updated_state.document))),
+            documentId=updated_document_id,
         )
         await run_in_threadpool(
             app.state.document_path.write_text, updated_state.document, encoding="utf-8"

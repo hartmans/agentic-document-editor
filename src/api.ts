@@ -30,22 +30,27 @@ export interface DocumentResponse {
   chunking_strategy: string;
 }
 
+// Character positions are Unicode code-point offsets, matching Python indexing.
 export interface ResumePoint {
-  documentId?: string;
-  chunkId: number | null;
-  offsetMs: number;
-  docCharPosition?: number | null;
+  documentId: string;
+  docCharPosition: number;
+}
+
+export interface WordMark {
+  timeMs: number;
+  docCharStart: number;
+  docCharEnd: number;
+}
+
+export interface ChunkMarks {
+  documentId: string;
+  chunkId: number;
+  marks: WordMark[];
 }
 
 export interface MessageDict {
   type: string;
   data: Record<string, unknown>;
-}
-
-export interface InterruptionRequest {
-  documentId: string;
-  chunk_id: number;
-  elapsed_ms: number;
 }
 
 export interface SttToken {
@@ -115,15 +120,11 @@ export async function fetchChunkAudio(
   return res.arrayBuffer();
 }
 
-export async function postInterruption(
-  payload: InterruptionRequest
-): Promise<ResumePoint> {
-  const res = await fetch(join(API_BASE, "/interruptions"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  return handleJson(res);
+export async function fetchChunkMarks(
+  documentId: string,
+  chunkId: number,
+): Promise<ChunkMarks> {
+  return handleJson(await fetch(join(API_BASE, `/chunks/${documentId}/${chunkId}/marks`)));
 }
 
 export async function fetchAsrConfig(): Promise<AsrConfigResponse> {
