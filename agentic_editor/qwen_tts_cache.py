@@ -17,7 +17,6 @@ import soundfile as sf
 import torch
 import whisperx
 
-from agentic_editor.speech_mark_alignment import speech_marks_from_records
 from agentic_editor.speech_marks import SpeechMark
 from agentic_editor.tss_cache import AbstractTtsCache
 
@@ -214,7 +213,12 @@ class QwenTtsCache(AbstractTtsCache):
     ) -> tuple[bytes, List[SpeechMark]]:
         prompt_items = self._prompt_items_for_voice()
         audio, sample_rate = self._generate_audio(synthesis_text, prompt_items)
-        speech_marks = self._align_speech_marks(synthesis_text, audio, sample_rate)
+        speech_marks = self._align_speech_marks(
+            text,
+            synthesis_text,
+            audio,
+            sample_rate,
+        )
         audio_bytes = self._encode_mp3(audio, sample_rate)
         return audio_bytes, speech_marks
 
@@ -350,6 +354,7 @@ class QwenTtsCache(AbstractTtsCache):
     def _align_speech_marks(
         self,
         text: str,
+        synthesis_text: str,
         audio: np.ndarray,
         sample_rate: int,
     ) -> List[SpeechMark]:
@@ -357,7 +362,7 @@ class QwenTtsCache(AbstractTtsCache):
         duration_seconds = (
             len(aligned_audio) / _WHISPERX_SAMPLE_RATE if len(aligned_audio) else 0.0
         )
-        transcript = [{"start": 0.0, "end": duration_seconds, "text": text}]
+        transcript = [{"start": 0.0, "end": duration_seconds, "text": synthesis_text}]
         with self._whisperx_lock:
             align_model, metadata = self._ensure_align_model()
             aligned = whisperx.align(
@@ -381,7 +386,7 @@ class QwenTtsCache(AbstractTtsCache):
                     "time_ms": int(round(float(start) * 1000)),
                 }
             )
-        return speech_marks_from_records(records, text)
+        return self._reconcile_speech_marks(text, synthesis_text, records)
 
     def _serialize_prompt_items(self, prompt_items: Sequence[object]) -> list[dict[str, Any]]:
         payload: list[dict[str, Any]] = []
