@@ -596,7 +596,7 @@ def chunk_documents(document: str) -> List[tuple[int, int]]:
     if document.strip() == "":
         return []
 
-    min_chunk_size = 1000
+    min_chunk_size = 400
     max_chunk_size = 2000
     separator = re.compile(r"(?:\r?\n\s*){2,}")
     break_ends = [match.end() for match in separator.finditer(document)]
@@ -618,26 +618,23 @@ def chunk_documents(document: str) -> List[tuple[int, int]]:
             break_idx += 1
 
         candidate_end = None
-        scan_idx = break_idx
-        while scan_idx < len(break_ends) and break_ends[scan_idx] <= window_end:
-            candidate_end = break_ends[scan_idx]
-            scan_idx += 1
-        break_idx = scan_idx
+        if break_idx <  len(break_ends)  and break_ends[break_idx] <= window_end:
+            candidate_end = break_ends[break_idx]
+            
 
         if candidate_end is not None:
             end = candidate_end
         else:
-            search_start = cursor + max_chunk_size
+            search_start = cursor + min_chunk_size
             if search_start >= doc_len:
                 end = doc_len
             else:
-                whitespace_match = re.search(r"\s", document[search_start:])
-                if whitespace_match:
-                    end = search_start + whitespace_match.start()
-                    while end < doc_len and document[end].isspace():
-                        end += 1
-                else:
-                    end = doc_len
+                candidate_end = doc_len
+                while whitespace_match := re.finditer(r"\s", document[search_start:]):
+                    whitespace_end = match.end+search_start
+                    if whitespace_end < window_end:
+                        candidate_end = whitespace_end
+                end = candidate_end
 
         if doc_len - end < min_chunk_size:
             end = doc_len
