@@ -413,3 +413,101 @@ def test_register_omegaconf_safe_globals_allows_torch_load(tmp_path):
 
     assert loaded["value"]["items"] == ["hello", "world"]
     assert loaded["value"]["flag"] is True
+
+
+class SerialControlledTtsCache(ControlledTtsCache):
+    concurrency_level = 1
+
+    def __init__(self, config, boto_session):
+        self.reader_waiting = Event()
+        super().__init__(config, boto_session)
+
+    def _resolve_cache_entry(self, cache_key, entry):
+        self.reader_waiting.set()
+        return super()._resolve_cache_entry(cache_key, entry)
+
+
+def test_response_precedes_demand_and_forward_chunks_precede_backlog(tmp_path):
+    cache = SerialControlledTtsCache({"cache_dir": str(tmp_path)}, None)
+    started, release = cache.add_gate("running")
+    reader = None
+    try:
+        cache.submit("running")
+        assert started.wait(timeout=5)
+        for text in ("old", "forward-2", "response", "forward-1", "demand"):
+            cache.submit(text)
+        cache.submit_ordered(
+            ["forward-1", "forward-2", "forward-1"],
+            response_texts=["response", "response-2"],
+        )
+        reader = Thread(target=lambda: cache["demand"])
+        reader.start()
+        assert cache.reader_waiting.wait(timeout=5)
+        release.set()
+        with cache._work_available:
+            assert cache._work_available.wait_for(
+                lambda: isinstance(cache._cache.get(cache._key("old")), tuple),
+                timeout=5,
+            )
+        assert cache.started == [
+            "running", "response", "response-2", "demand",
+            "forward-1", "forward-2", "old",
+        ]
+        assert cache.calls["forward-1"] == 1
+    finally:
+        release.set()
+        if reader is not None:
+            reader.join(timeout=5)
+        cache._tts_executor.shutdown(wait=True)
+
+
+def test_response_promotion_survives_demand_read(tmp_path):
+    cache = SerialControlledTtsCache({"cache_dir": str(tmp_path)}, None)
+    started, release = cache.add_gate("running")
+    reader = None
+    try:
+        cache.submit("running")
+        assert started.wait(timeout=5)
+        cache.submit("response")
+        reader = Thread(target=lambda: cache["response"])
+        reader.start()
+        assert cache.reader_waiting.wait(timeout=5)
+        cache.submit("response", priority="response")
+        cache.submit("response")
+        release.set()
+        reader.join(timeout=5)
+        assert not reader.is_alive()
+        assert cache.started == ["running", "response"]
+        assert cache.calls["response"] == 1
+    finally:
+        release.set()
+        if reader is not None:
+            reader.join(timeout=5)
+        cache._tts_executor.shutdown(wait=True)
+
+
+def test_document_submission_starts_at_resume_chunk(tmp_path):
+    from agentic_editor.document import apply_document_update
+    from agentic_editor.tts import build_document_state, submit_document_audio
+
+    cache = SerialControlledTtsCache({"cache_dir": str(tmp_path)}, None)
+    try:
+        text = "".join(letter * 450 + "\n\n" for letter in "ACDEFG")
+        state = build_document_state(text, tts_cache=cache, submit_audio=False)
+        updated = apply_document_update("B" + text[1:], state)
+        response = build_document_state("Response", tts_cache=cache, submit_audio=False)
+        assert cache._cache == {}
+        submit_document_audio(
+            updated, position_hint=updated.chunks[1].doc_char_start,
+            response_state=response,
+        )
+        expected = list(dict.fromkeys(["Response"] + [c.text for c in updated.chunks[1:]]))
+        with cache._work_available:
+            assert cache._work_available.wait_for(
+                lambda: all(isinstance(cache._cache.get(cache._key(t)), tuple) for t in expected),
+                timeout=5,
+            )
+        assert cache.started == expected
+        assert cache._key(updated.chunks[0].text) not in cache._cache
+    finally:
+        cache._tts_executor.shutdown(wait=True)

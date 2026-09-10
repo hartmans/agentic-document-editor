@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from typing import List
 import typing
 
@@ -85,7 +84,13 @@ def build_document_state(
     config: dict[str, typing.Any] | None = None,
     prefix: str = "",
     position_hint: int | None = None,
+    submit_audio: bool = True,
 ) -> DocumentState:
+    """Build chunk metadata, optionally prefetching audio from position_hint.
+
+    Edit handling defers submission until response chunks are also available.
+    Startup callers retain eager submission by default.
+    """
     chunk_spans = chunk_documents(document_text)
     if tts_cache is None:
         tts_cache = TtsCache(config or {}, session, prefix=prefix)
@@ -115,21 +120,24 @@ def build_document_state(
         aws_session=session,
         region_name=tts_cache.region_name,
     )
-    if position_hint is not None and chunks:
-        preferred_chunk_id = state.find_chunk_id(position_hint)
-        logging.info("Submitting preferred chunk %s first", preferred_chunk_id)
-        tts_cache.submit(chunks[preferred_chunk_id].text)
-        for chunk_id, chunk in enumerate(chunks):
-            if chunk_id == preferred_chunk_id:
-                continue
-            logging.info("Submitting chunk %s (%s chars)", chunk_id, len(chunk.text))
-            tts_cache.submit(chunk.text)
-    else:
-        for chunk_id, chunk in enumerate(chunks):
-            logging.info("Submitting chunk %s (%s chars)", chunk_id, len(chunk.text))
-            tts_cache.submit(chunk.text)
+    if submit_audio:
+        submit_document_audio(state, position_hint=position_hint)
 
     return state
+
+
+def submit_document_audio(
+    state: DocumentState,
+    *,
+    position_hint: int | None = None,
+    response_state: DocumentState | None = None,
+) -> None:
+    """Submit response audio, then document audio from the resume point forward."""
+    first = state.find_chunk_id(position_hint) if position_hint is not None else 0
+    state.tts_cache.submit_ordered(
+        [chunk.text for chunk in state.chunks[first:]],
+        response_texts=[chunk.text for chunk in response_state.chunks] if response_state else (),
+    )
 
 
 __all__ = [
@@ -138,4 +146,5 @@ __all__ = [
     "map_elapsed_time_to_document",
     "map_doc_char_to_offset",
     "build_document_state",
+    "submit_document_audio",
 ]

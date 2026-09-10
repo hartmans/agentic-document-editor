@@ -23,6 +23,7 @@ def test_apply_document_update_rebuilds_state():
         document_text="Hello world",
         tts_cache=cache,
         session=session,
+        submit_audio=False,
     )
     update = DocumentUpdate(offset=6, length=5, new_text="there")
     updated_document = (
@@ -39,4 +40,4 @@ def test_apply_document_update_rebuilds_state():
     assert new_state.aws_session is session
     assert len(new_state.chunks) == 1
     assert new_state.chunks[0].text == "Hello there"
-    assert cache.submissions[-1] == "Hello there"
+    assert cache.submissions == []

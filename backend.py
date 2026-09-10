@@ -25,6 +25,7 @@ from agentic_editor.document import (
 from agentic_editor.graph import GraphState, build_graph
 from agentic_editor.tts import (
     build_document_state,
+    submit_document_audio,
     map_doc_char_to_offset,
     map_elapsed_time_to_document,
 )
@@ -323,8 +324,15 @@ def create_app(
         response_document_id = "response-" + _sha256_text(response_text)
         response_document_state = build_document_state(
             document_text=response_text,
+            submit_audio=False,
             tts_cache=document_state.tts_cache,
             session=document_state.aws_session,
+        )
+        submit_document_audio(
+            updated_state,
+            position_hint=(output_state.position if output_state.position is not None
+                           else resume_point.docCharPosition),
+            response_state=response_document_state,
         )
         if output_state.position is not None:
             updated_resume_point = await run_in_threadpool(

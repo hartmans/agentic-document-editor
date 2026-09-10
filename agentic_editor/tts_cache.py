@@ -75,8 +75,15 @@ class TtsCache:
         cache_class = resolve_tts_cache_class(config, prefix=prefix)
         self._impl = cache_class(config, boto_session, prefix=prefix)
 
-    def submit(self, text: str) -> None:
-        self._impl.submit(text)
+    def submit(
+        self, text: str, *, priority: typing.Literal["background", "response"] = "background"
+    ) -> None:
+        self._impl.submit(text, priority=priority)
+
+    def submit_ordered(
+        self, texts: typing.Sequence[str], *, response_texts: typing.Sequence[str] = ()
+    ) -> None:
+        self._impl.submit_ordered(texts, response_texts=response_texts)
 
     def __getitem__(self, text: str):
         return self._impl[text]

@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 import threading
-from typing import List, Sequence
+from typing import List, Literal, Sequence
 import typing
 
 import sh
@@ -27,7 +27,7 @@ def _speech_marks_to_records(marks: Sequence[SpeechMark]) -> List[dict]:
 @dataclass
 class _CacheEntry:
     text: str
-    urgent: bool = False
+    priority: Literal["background", "demand", "response"] = "background"
     state: str = "pending"
     result: tuple[bytes, List[SpeechMark]] | None = None
     exception: BaseException | None = None
@@ -77,6 +77,7 @@ class AbstractTtsCache(ABC):
         self._work_available = threading.Condition(self._lock)
         self._background_items: deque[str] = deque()
         self._background_keys: set[str] = set()
+        self._response_items: deque[str] = deque()
         self._urgent_items: deque[str] = deque()
         self._urgent_keys: set[str] = set()
         self._running_workers = 0
@@ -95,7 +96,11 @@ class AbstractTtsCache(ABC):
             return self.config[key]
         return None
 
-    def submit(self, text: str) -> None:
+    def submit(
+        self, text: str, *, priority: Literal["background", "response"] = "background"
+    ) -> None:
+        if priority not in ("background", "response"):
+            raise ValueError(f"Unknown submission priority: {priority}")
         key = self._key(text)
         audio_path = self._audio_path(key)
         marks_path = self._marks_path(key)
@@ -104,10 +109,44 @@ class AbstractTtsCache(ABC):
 
         with self._work_available:
             entry = self._cache.get(key)
-            if entry is not None:
-                return
-            self._cache[key] = _CacheEntry(text=text)
-            self._enqueue_background_locked(key)
+            if entry is None:
+                entry = _CacheEntry(text=text)
+                self._cache[key] = entry
+                self._enqueue_background_locked(key)
+            if (
+                priority == "response" and isinstance(entry, _CacheEntry)
+                and entry.state == "pending" and entry.priority != "response"
+            ):
+                entry.priority = "response"
+                self._background_keys.discard(key)
+                self._urgent_keys.discard(key)
+                self._response_items.append(key)
+                self._work_available.notify()
+
+    def submit_ordered(
+        self, texts: Sequence[str], *, response_texts: Sequence[str] = ()
+    ) -> None:
+        """Queue responses first and move pending document texts ahead of backlog.
+
+        Register the entire group under the scheduler lock. Running synthesis and
+        demand reads retain their precedence over document background work.
+        """
+        with self._work_available:
+            for text in response_texts:
+                self.submit(text, priority="response")
+            preferred: list[str] = []
+            seen: set[str] = set()
+            for text in texts:
+                self.submit(text)
+                key = self._key(text)
+                if key in self._background_keys and key not in seen:
+                    preferred.append(key)
+                    seen.add(key)
+            self._background_items = deque(preferred + [
+                key for key in self._background_items
+                if key in self._background_keys and key not in seen
+            ])
+            self._work_available.notify_all()
 
     def __getitem__(self, text: str) -> tuple[bytes, List[SpeechMark]]:
         key = self._key(text)
@@ -121,14 +160,14 @@ class AbstractTtsCache(ABC):
                 return cached_entry
             if isinstance(cached_entry, _CacheEntry):
                 entry = cached_entry
-                if entry.state == "pending" and not entry.urgent:
-                    entry.urgent = True
+                if entry.state == "pending" and entry.priority == "background":
+                    entry.priority = "demand"
                     self._background_keys.discard(key)
                     self._enqueue_urgent_locked(key)
             elif audio_path.exists() and marks_path.exists():
                 pass
             else:
-                entry = _CacheEntry(text=text, urgent=True)
+                entry = _CacheEntry(text=text, priority="demand")
                 self._cache[key] = entry
                 self._enqueue_urgent_locked(key)
 
@@ -237,7 +276,7 @@ class AbstractTtsCache(ABC):
             while True:
                 while (
                     self._running_workers >= self._tts_executor._max_workers
-                    or (not self._urgent_items and not self._background_items)
+                    or (not self._response_items and not self._urgent_items and not self._background_items)
                 ):
                     self._work_available.wait()
                 scheduled = self._get_next_pending_entry_locked()
@@ -261,11 +300,16 @@ class AbstractTtsCache(ABC):
         )
 
     def _get_next_pending_entry_locked(self) -> tuple[str, _CacheEntry] | None:
+        while self._response_items:
+            key = self._response_items.popleft()
+            entry = self._cache.get(key)
+            if isinstance(entry, _CacheEntry) and entry.state == "pending" and entry.priority == "response":
+                return key, entry
         while self._urgent_items:
             key = self._urgent_items.popleft()
             self._urgent_keys.discard(key)
             entry = self._cache.get(key)
-            if isinstance(entry, _CacheEntry) and entry.state == "pending" and entry.urgent:
+            if isinstance(entry, _CacheEntry) and entry.state == "pending" and entry.priority == "demand":
                 return key, entry
         while self._background_items:
             key = self._background_items.popleft()
@@ -273,7 +317,7 @@ class AbstractTtsCache(ABC):
                 continue
             self._background_keys.discard(key)
             entry = self._cache.get(key)
-            if isinstance(entry, _CacheEntry) and entry.state == "pending" and not entry.urgent:
+            if isinstance(entry, _CacheEntry) and entry.state == "pending" and entry.priority == "background":
                 return key, entry
         return None
 

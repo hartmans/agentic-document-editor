@@ -647,12 +647,13 @@ def chunk_documents(document: str) -> List[tuple[int, int]]:
 
 
 def apply_document_update(update: str, state: DocumentState) -> DocumentState:
-    """Return a new DocumentState after applying a document update."""
+    """Rebuild document metadata without scheduling audio for the edited text."""
     updated_document = update
     from agentic_editor.tts import build_document_state
 
     return build_document_state(
         document_text=updated_document,
+        submit_audio=False,
         tts_cache=state.tts_cache,
         session=state.aws_session,  # type: ignore
     )
