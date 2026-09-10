@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 import hashlib
 import json
 import logging
+import re
 import shlex
 from abc import ABC, abstractmethod
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -15,8 +17,10 @@ import typing
 
 import sh
 
+from agentic_editor.speech_mark_alignment import speech_marks_from_records
 from agentic_editor.speech_marks import SpeechMark
 
+_TOKEN_RE = re.compile(r"[A-Za-z0-9']+")
 
 
 def _speech_marks_to_records(marks: Sequence[SpeechMark]) -> List[dict]:
@@ -31,6 +35,19 @@ class _CacheEntry:
     state: str = "pending"
     result: tuple[bytes, List[SpeechMark]] | None = None
     exception: BaseException | None = None
+
+
+@dataclass(frozen=True)
+class _TextToken:
+    normalized: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class _TimedToken:
+    normalized: str
+    time_ms: int
 
 
 class AbstractTtsCache(ABC):
@@ -263,6 +280,192 @@ class AbstractTtsCache(ABC):
         audio_path.write_bytes(audio_bytes)
         self._write_speech_marks(marks_path, speech_marks)
         return audio_bytes, list(speech_marks)
+
+    def _reconcile_speech_marks(
+        self,
+        text: str,
+        synthesis_text: str,
+        word_records: Sequence[dict[str, typing.Any]],
+    ) -> List[SpeechMark]:
+        if not word_records:
+            return []
+        if text == synthesis_text:
+            return speech_marks_from_records(word_records, text)
+
+        original_tokens = self._tokenize_text(text)
+        synthesis_tokens = self._tokenize_text(synthesis_text)
+        aligned_tokens = self._tokenize_word_records(word_records)
+        if not original_tokens or not synthesis_tokens or not aligned_tokens:
+            return speech_marks_from_records(word_records, text)
+
+        synth_to_original = {
+            source_idx: target_idx
+            for source_idx, target_idx, _ in self._align_token_sequences(
+                [token.normalized for token in synthesis_tokens],
+                [token.normalized for token in original_tokens],
+            )
+        }
+        aligned_to_synth = self._align_token_sequences(
+            [token.normalized for token in aligned_tokens],
+            [token.normalized for token in synthesis_tokens],
+        )
+
+        speech_marks: list[SpeechMark] = []
+        seen_spans: set[tuple[int, int, int]] = set()
+        for aligned_idx, synth_idx, cost in aligned_to_synth:
+            if cost > 0.75:
+                continue
+            original_idx = synth_to_original.get(synth_idx)
+            if original_idx is None:
+                continue
+            source_token = aligned_tokens[aligned_idx]
+            original_token = original_tokens[original_idx]
+            key = (
+                source_token.time_ms,
+                original_token.start,
+                original_token.end,
+            )
+            if key in seen_spans:
+                continue
+            seen_spans.add(key)
+            speech_marks.append(
+                SpeechMark(
+                    time_ms=source_token.time_ms,
+                    chunk_char_start=original_token.start,
+                    chunk_char_end=original_token.end,
+                )
+            )
+
+        if not speech_marks:
+            return speech_marks_from_records(word_records, text)
+        speech_marks.sort(key=lambda mark: mark.time_ms)
+        return speech_marks
+
+    def _tokenize_text(self, text: str) -> list[_TextToken]:
+        tokens: list[_TextToken] = []
+        for match in _TOKEN_RE.finditer(text):
+            normalized = self._normalize_token(match.group(0))
+            if not normalized:
+                continue
+            tokens.append(
+                _TextToken(
+                    normalized=normalized,
+                    start=match.start(),
+                    end=match.end(),
+                )
+            )
+        return tokens
+
+    def _tokenize_word_records(
+        self,
+        word_records: Sequence[dict[str, typing.Any]],
+    ) -> list[_TimedToken]:
+        tokens: list[_TimedToken] = []
+        for rec in word_records:
+            if not isinstance(rec, dict):
+                continue
+            mark_type = rec.get("type") or rec.get("mark_type")
+            if mark_type not in (None, "word"):
+                continue
+            time_value = rec.get("time_ms", rec.get("time"))
+            word_value = rec.get("value") or rec.get("text")
+            if time_value is None or word_value is None:
+                continue
+            try:
+                time_ms = int(time_value)
+            except (TypeError, ValueError):
+                continue
+            for match in _TOKEN_RE.finditer(str(word_value)):
+                normalized = self._normalize_token(match.group(0))
+                if not normalized:
+                    continue
+                tokens.append(_TimedToken(normalized=normalized, time_ms=time_ms))
+        return tokens
+
+    def _normalize_token(self, token: str) -> str:
+        return token.lower()
+
+    def _align_token_sequences(
+        self,
+        source_tokens: Sequence[str],
+        target_tokens: Sequence[str],
+    ) -> list[tuple[int, int, float]]:
+        if not source_tokens or not target_tokens:
+            return []
+
+        insertion_cost = 0.9
+        deletion_cost = 0.9
+        rows = len(source_tokens) + 1
+        cols = len(target_tokens) + 1
+        costs = [[0.0] * cols for _ in range(rows)]
+        steps: list[list[str | None]] = [[None] * cols for _ in range(rows)]
+
+        for row in range(1, rows):
+            costs[row][0] = row * deletion_cost
+            steps[row][0] = "up"
+        for col in range(1, cols):
+            costs[0][col] = col * insertion_cost
+            steps[0][col] = "left"
+
+        for row in range(1, rows):
+            for col in range(1, cols):
+                substitution = self._token_substitution_cost(
+                    source_tokens[row - 1],
+                    target_tokens[col - 1],
+                )
+                diagonal_cost = costs[row - 1][col - 1] + substitution
+                up_cost = costs[row - 1][col] + deletion_cost
+                left_cost = costs[row][col - 1] + insertion_cost
+
+                best_cost = diagonal_cost
+                best_step = "diag"
+                if up_cost < best_cost:
+                    best_cost = up_cost
+                    best_step = "up"
+                if left_cost < best_cost:
+                    best_cost = left_cost
+                    best_step = "left"
+
+                costs[row][col] = best_cost
+                steps[row][col] = best_step
+
+        pairs: list[tuple[int, int, float]] = []
+        row = len(source_tokens)
+        col = len(target_tokens)
+        while row > 0 or col > 0:
+            step = steps[row][col]
+            if step == "diag":
+                source_idx = row - 1
+                target_idx = col - 1
+                pairs.append(
+                    (
+                        source_idx,
+                        target_idx,
+                        self._token_substitution_cost(
+                            source_tokens[source_idx],
+                            target_tokens[target_idx],
+                        ),
+                    )
+                )
+                row -= 1
+                col -= 1
+                continue
+            if step == "up":
+                row -= 1
+                continue
+            if step == "left":
+                col -= 1
+                continue
+            break
+
+        pairs.reverse()
+        return pairs
+
+    def _token_substitution_cost(self, source: str, target: str) -> float:
+        if source == target:
+            return 0.0
+        ratio = SequenceMatcher(a=source, b=target).ratio()
+        return 1.0 - ratio
 
     def _scheduler_loop(self) -> None:
         while True:
