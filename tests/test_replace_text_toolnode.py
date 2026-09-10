@@ -1,7 +1,6 @@
-from types import SimpleNamespace
-
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.prebuilt import ToolNode
+from langgraph.runtime import Runtime
 from langgraph.types import Command
 
 from agentic_editor.document import DocumentState
@@ -38,7 +37,7 @@ def test_replace_text_toolnode_executes():
         ],
     )
 
-    runtime = SimpleNamespace(context=None, store=None, stream_writer=None)
+    runtime = Runtime()
 
     result = tool_node.invoke(
         {
