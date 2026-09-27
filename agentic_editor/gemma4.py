@@ -33,6 +33,7 @@ Rules for the final instruction output:
 - Resolve names, jargon, spelling, capitalization, homophones, possessives, and plurals from document context.
 - Apply speaker self-corrections so the output reflects the user's final intent.
 - Prefer imperative editing instructions that are unambiguous for a later model.
+- The instruction may talk about jumping to a position; the editing model will understand that jumping to a position means continuing reading the document from that position.
 - Do not describe the audio, reasoning, or your intermediate analysis.
 - Do not add markdown, bullets, or quotation marks unless they are part of the intended instruction.
 """

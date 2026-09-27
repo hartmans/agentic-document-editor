@@ -198,6 +198,7 @@ def create_app(
     *,
     config: dict[str, typing.Any],
     asr_receiver: object | None = None,
+    gemma4_debug_audio_dir: Path | None = None,
 ) -> FastAPI:
     document_id = uuid4().hex
     app = FastAPI(title="Agentic Document TTS Server")
@@ -211,6 +212,7 @@ def create_app(
     app.state.asr_region_name = str(config["region_name"]) if config.get("region_name") else None
     app.state.asr_receiver = asr_receiver
     app.state.asr_config = dict(config)
+    app.state.gemma4_debug_audio_dir = gemma4_debug_audio_dir
 
     app.add_middleware(
         CORSMiddleware,
@@ -401,7 +403,10 @@ def create_app(
                 if app.state.asr_receiver is None:
                     from agentic_editor.gemma4 import Gemma4AsrReceiver
 
-                    app.state.asr_receiver = Gemma4AsrReceiver(app.state.asr_config)
+                    app.state.asr_receiver = Gemma4AsrReceiver(
+                        app.state.asr_config,
+                        debug_audio_dir=app.state.gemma4_debug_audio_dir,
+                    )
                 receiver = app.state.asr_receiver
                 while True:
                     message = await websocket.receive()
@@ -481,6 +486,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--port", type=int, default=8000, help="Port for uvicorn (default: 8000)."
     )
+    parser.add_argument(
+        "--debug-gemma4",
+        action="store_true",
+        help="Write each Gemma4 ASR audio fragment to logs/*.wav for debugging.",
+    )
     return parser.parse_args()
 
 
@@ -531,6 +541,7 @@ def main():
         state,
         document_path,
         config=config,
+        gemma4_debug_audio_dir=(Path("logs") if args.debug_gemma4 else None),
     )
     uvicorn.run(app, host=args.host, port=args.port)
 

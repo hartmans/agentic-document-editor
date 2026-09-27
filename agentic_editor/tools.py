@@ -44,9 +44,14 @@ def replace_text(
     if result.index is None:
         return result.render_error(target_field_name="old_text")
     updated = document[:result.index] + new_text + document[result.index + len(old_text) :]
+    # Keep nearby preceding context, but jump to edits farther ahead.
+    resume_position = (
+        result.index if result.index < position or result.index > position + 100
+        else position
+    )
     return Command(update={
         'document': updated,
-        'position': min(position, result.index),
+        'position': resume_position,
             'messages': [ToolMessage(
                 content="Document updated. Now briefly describe your change so the user knows what you did.",
                 tool_call_id=tool_call_id,

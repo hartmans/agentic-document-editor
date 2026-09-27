@@ -1,3 +1,5 @@
+import pytest
+
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
@@ -13,9 +15,20 @@ class StubTtsCache:
         raise AssertionError("replace_text should not access TTS cache")
 
 
-def test_replace_text_toolnode_executes():
+@pytest.mark.parametrize(("position", "change_start", "expected_position"), [
+    (200, 100, 100),  # Rewind to an earlier change.
+    (200, 200, 200),
+    (200, 201, 200),
+    (200, 299, 200),
+    (200, 300, 200),  # Exactly 100 characters ahead retains context.
+    (200, 301, 301),
+    (200, 500, 500),
+])
+def test_replace_text_toolnode_executes(position, change_start, expected_position):
+    prefix = "x" * change_start
+    document = prefix + "Hello world"
     doc_state = DocumentState(
-        document="Hello world",
+        document=document,
         voice_id="Joanna",
         tts_cache=StubTtsCache(),
     )
@@ -43,7 +56,7 @@ def test_replace_text_toolnode_executes():
         {
             "messages": [ai_msg],
             "document_state": doc_state,
-            "position": 0,
+            "position": position,
         },
         runtime=runtime,
     )
@@ -55,5 +68,6 @@ def test_replace_text_toolnode_executes():
     # ToolNode should have appended a ToolMessage and returned a document update.
     assert isinstance(update["messages"][-1], ToolMessage)
     assert update["messages"][-1].tool_call_id == "call_1"
-    assert update["document"] == "Hi world"
-    assert doc_state.document == "Hello world"
+    assert update["document"] == prefix + "Hi world"
+    assert update["position"] == expected_position
+    assert doc_state.document == document
