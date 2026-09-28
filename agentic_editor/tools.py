@@ -85,6 +85,7 @@ def reposition_playback(
         return result.render_error()
     return Command(update={
         'position': result.index,
+        'response_text': message or '',
         'messages': [ToolMessage(
             content='success',
             tool_call_id=tool_call_id,

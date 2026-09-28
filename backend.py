@@ -23,7 +23,7 @@ from agentic_editor.document import (
     apply_document_update,
     load_document,
 )
-from agentic_editor.graph import GraphState, build_graph
+from agentic_editor.graph import GraphState, build_graph, initial_messages, instruction_message
 from agentic_editor.tts import (
     build_document_state,
     submit_document_audio,
@@ -33,13 +33,6 @@ from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from langchain_core.messages import (
-    BaseMessage,
-    AIMessage,
-    HumanMessage,
-    messages_from_dict,
-    messages_to_dict,
-)
 from pydantic import BaseModel, Field
 import uvicorn
 import yaml
@@ -81,13 +74,11 @@ class InterruptionRequest(BaseModel):
 
 class InstructionsRequest(BaseModel):
     baseDocumentId: str
-    messages: List[dict] = Field(default_factory=list)
     instructions: str
     resumePoint: CharacterResumePoint
 
 
 class InstructionsResponse(BaseModel):
-    messages: List[dict]
     resumePoint: CharacterResumePoint
     documentId: str
     document: DocumentResponseModel
@@ -208,6 +199,7 @@ def create_app(
     app.state.documents  = {document_id: state}
     app.state.instructions_lock = asyncio.Lock()
     app.state.graph = build_graph(config)
+    app.state.messages = initial_messages(state.document)
     app.state.asr_type = _resolve_asr_type(config)
     app.state.asr_region_name = str(config["region_name"]) if config.get("region_name") else None
     app.state.asr_receiver = asr_receiver
@@ -325,13 +317,14 @@ def create_app(
     async def process_instructions(request: InstructionsRequest):
         document_state = app.state.document_state
         resume_point = request.resumePoint
-        messages: list[BaseMessage]
-        raw_messages = list(request.messages)
-        if raw_messages and isinstance(raw_messages[0], dict):
-            messages = list(messages_from_dict(raw_messages))
-        else:
-            messages = typing.cast(list[BaseMessage], raw_messages)
-        messages.append(HumanMessage(content=request.instructions))
+        messages = [
+            *app.state.messages,
+            instruction_message(
+                document_state.document,
+                resume_point.docCharPosition,
+                request.instructions,
+            ),
+        ]
         graph_state = GraphState(
             document_state=document_state,
             position=resume_point.docCharPosition,
@@ -343,9 +336,7 @@ def create_app(
             output_state = result
         else:
             output_state = GraphState(**result)
-        if isinstance(output_state.messages[-1], AIMessage):
-            response_message = output_state.messages[-1]
-        else:
+        if output_state.response_text is None:
             raise RuntimeError('No AI response')
         updated_state = output_state.document_state
         if updated_state is None:
@@ -354,9 +345,7 @@ def create_app(
             uuid4().hex if updated_state.document != document_state.document
             else app.state.document_id
         )
-        response_text = response_message.content # pyright: ignore[reportPossiblyUnboundVariable]
-        if not isinstance(response_text, str):
-            response_text = json.dumps(response_text, ensure_ascii=True)
+        response_text = output_state.response_text
         response_document_id = "response-" + _sha256_text(response_text)
         response_document_state = build_document_state(
             document_text=response_text,
@@ -385,8 +374,8 @@ def create_app(
         app.state.documents[response_document_id] = response_document_state
         app.state.document_state = updated_state
         app.state.document_id = updated_document_id
+        app.state.messages = output_state.messages
         return InstructionsResponse(
-            messages=messages_to_dict(output_state.messages),
             resumePoint=updated_resume_point,
             documentId=updated_document_id,
             document=_build_document_response(updated_state),

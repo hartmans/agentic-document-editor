@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import {
   ApiError,
   DocumentResponse,
-  MessageDict,
   fetchStatus,
   postInstructions,
   ResumePoint,
@@ -29,7 +28,6 @@ export function DocumentEditor() {
   const [instructionsPending, setInstructionsPending] = useState(false);
   const [voiceMode, setVoiceMode] = useState<"idle" | "armed" | "waiting">("idle");
   const [resumePoint, setResumePoint] = useState<ResumePoint | null>(null);
-  const [messages, setMessages] = useState<MessageDict[]>([]);
   const playbackRef = useRef<DocumentPlaybackHandle | null>(null);
   const responsePlaybackRef = useRef<DocumentPlaybackHandle | null>(null);
   const mountedRef = useRef(false);
@@ -127,7 +125,6 @@ export function DocumentEditor() {
       void play(instructionsSentUrl);
       const result = await postInstructions({
         baseDocumentId: snapshot.documentId,
-        messages,
         instructions: trimmed,
         resumePoint: {
           documentId: snapshot.documentId,
@@ -137,7 +134,6 @@ export function DocumentEditor() {
       if (!isCurrent()) return;
       // Install the revision and its resume point together; no status refetch.
       setSnapshot({ documentId: result.documentId, document: result.document });
-      setMessages(result.messages);
       setResumePoint(result.resumePoint);
       resumePointRef.current = result.resumePoint;
       if (intent === intentRef.current) {
@@ -158,7 +154,6 @@ export function DocumentEditor() {
           if (!isCurrent()) return;
           setSnapshot(status);
           setResumePoint(null);
-          setMessages([]);
           resumePointRef.current = null;
           setError("The document changed in another session. Loaded the latest revision; please repeat your instruction.");
         } catch (refreshError) {

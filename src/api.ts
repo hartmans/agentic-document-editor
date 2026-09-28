@@ -48,11 +48,6 @@ export interface ChunkMarks {
   marks: WordMark[];
 }
 
-export interface MessageDict {
-  type: string;
-  data: Record<string, unknown>;
-}
-
 export interface SttToken {
   access_key_id: string;
   secret_access_key: string;
@@ -72,13 +67,11 @@ export type AsrConfigResponse =
 
 export interface InstructionsRequest {
   baseDocumentId: string;
-  messages: MessageDict[];
   instructions: string;
   resumePoint: ResumePoint;
 }
 
 export interface InstructionsResponse {
-  messages: MessageDict[];
   resumePoint: ResumePoint;
   documentId: string;
   document: DocumentResponse;

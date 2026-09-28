@@ -7,7 +7,7 @@ from langgraph.types import Command
 
 from agentic_editor.document import DocumentState
 from agentic_editor.graph import DocumentUpdate
-from agentic_editor.tools import replace_text
+from agentic_editor.tools import replace_text, reposition_playback
 
 
 class StubTtsCache:
@@ -71,3 +71,37 @@ def test_replace_text_toolnode_executes(position, change_start, expected_positio
     assert update["document"] == prefix + "Hi world"
     assert update["position"] == expected_position
     assert doc_state.document == document
+
+
+def test_reposition_playback_closes_tool_turn_and_sets_response_text():
+    document = "Start here and continue."
+    doc_state = DocumentState(
+        document=document,
+        voice_id="Joanna",
+        tts_cache=StubTtsCache(),
+    )
+    tool_node = ToolNode([reposition_playback])
+    ai_msg = AIMessage(
+        content="",
+        tool_calls=[{
+            "id": "call_1",
+            "name": "reposition_playback",
+            "args": {
+                "before": "",
+                "target": "continue",
+                "after": ".",
+                "message": "Resuming there.",
+            },
+        }],
+    )
+
+    result = tool_node.invoke(
+        {"messages": [ai_msg], "document_state": doc_state},
+        runtime=Runtime(),
+    )
+
+    assert isinstance(result, list)
+    update = result[0].update
+    assert update["response_text"] == "Resuming there."
+    assert isinstance(update["messages"][0], ToolMessage)
+    assert update["messages"][1] == AIMessage(content="Resuming there.")
