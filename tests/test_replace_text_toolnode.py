@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from langchain_core.messages import AIMessage, ToolMessage
@@ -56,6 +58,7 @@ def test_replace_text_toolnode_executes(position, change_start, expected_positio
         {
             "messages": [ai_msg],
             "document_state": doc_state,
+            "document": document,
             "position": position,
         },
         runtime=runtime,
@@ -70,6 +73,10 @@ def test_replace_text_toolnode_executes(position, change_start, expected_positio
     assert update["messages"][-1].tool_call_id == "call_1"
     assert update["document"] == prefix + "Hi world"
     assert update["position"] == expected_position
+    assert json.loads(update["messages"][-1].content) == {
+        "position": change_start,
+        "text": "Hi world",
+    }
     assert doc_state.document == document
 
 
@@ -96,7 +103,11 @@ def test_reposition_playback_closes_tool_turn_and_sets_response_text():
     )
 
     result = tool_node.invoke(
-        {"messages": [ai_msg], "document_state": doc_state},
+        {
+            "messages": [ai_msg],
+            "document_state": doc_state,
+            "document": document,
+        },
         runtime=Runtime(),
     )
 
@@ -104,4 +115,43 @@ def test_reposition_playback_closes_tool_turn_and_sets_response_text():
     update = result[0].update
     assert update["response_text"] == "Resuming there."
     assert isinstance(update["messages"][0], ToolMessage)
+    assert json.loads(update["messages"][0].content) == {
+        "position": document.index("continue"),
+        "text": "continue.",
+    }
     assert update["messages"][1] == AIMessage(content="Resuming there.")
+
+
+def test_replace_text_searches_the_current_mutable_document():
+    original = "alpha beta"
+    current = "alpha beta gamma"
+    doc_state = DocumentState(
+        document=original,
+        voice_id="Joanna",
+        tts_cache=StubTtsCache(),
+    )
+    ai_msg = AIMessage(
+        content="",
+        tool_calls=[{
+            "id": "call_1",
+            "name": "replace_text",
+            "args": {
+                "before": "beta ",
+                "old_text": "gamma",
+                "new_text": "delta",
+                "after": "",
+            },
+        }],
+    )
+
+    result = ToolNode([replace_text]).invoke(
+        {
+            "messages": [ai_msg],
+            "document_state": doc_state,
+            "document": current,
+            "position": 0,
+        },
+        runtime=Runtime(),
+    )
+
+    assert result[0].update["document"] == "alpha beta delta"
