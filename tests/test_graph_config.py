@@ -1,4 +1,5 @@
 from agentic_editor.graph import _build_llm
+from hartmans_ai.langchain_logger import ChatMLJsonlCallbackHandler
 
 
 def test_build_llm_uses_default_llm_block(monkeypatch):
@@ -15,6 +16,7 @@ def test_build_llm_uses_default_llm_block(monkeypatch):
     assert captured["model"] == "gemma4:31b"
     assert captured["model_provider"] == "ollama"
     assert len(captured["callbacks"]) == 1
+    assert isinstance(captured["callbacks"][0], ChatMLJsonlCallbackHandler)
 
 
 def test_build_llm_uses_explicit_llm_block(monkeypatch):
@@ -43,3 +45,4 @@ def test_build_llm_uses_explicit_llm_block(monkeypatch):
     assert captured["api_key"] == "EMPTY"
     assert captured["temperature"] == 0.1
     assert len(captured["callbacks"]) == 1
+    assert isinstance(captured["callbacks"][0], ChatMLJsonlCallbackHandler)

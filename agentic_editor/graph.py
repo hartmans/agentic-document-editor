@@ -9,10 +9,10 @@ from langgraph.types import Overwrite, Command
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
 from langchain.chat_models import init_chat_model
 import langchain_core.language_models
+from hartmans_ai.langchain_logger import ChatMLJsonlCallbackHandler
 import dataclasses
 from .document import DocumentState, DocumentUpdate, apply_document_update
 from . import tools
-from .llm_logging import ChatMLJsonlCallbackHandler
 from pydantic import BaseModel, Field
 
 _DEFAULT_LLM_CONFIG = {"model": "ollama:gemma4:31b",
