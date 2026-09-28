@@ -30,7 +30,7 @@ export abstract class BaseSpeechToText {
   protected readonly props: SpeechToTextProps;
   protected readonly abortController = new AbortController();
   protected readonly targetSampleRate = 16000;
-  protected readonly inputGain = 2.0;
+  protected readonly inputGain = 1.0;
 
   private silenceTimer: ReturnType<typeof setInterval> | null = null;
   private stopped = false;
