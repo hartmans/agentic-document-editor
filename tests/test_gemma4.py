@@ -1,4 +1,5 @@
 import base64
+import threading
 import wave
 
 import numpy as np
@@ -21,7 +22,30 @@ class FakeChatModel:
         )
 
 
-def test_gemma4_uses_config_block_and_caches_document_analysis(monkeypatch):
+def test_gemma4_starts_document_analysis_during_initialization(monkeypatch):
+    analysis_started = threading.Event()
+    allow_analysis_to_finish = threading.Event()
+
+    class BlockingChatModel:
+        def invoke(self, messages, **kwargs):
+            analysis_started.set()
+            assert allow_analysis_to_finish.wait(timeout=2)
+            return AIMessage(content="Names: Gemma.")
+
+    monkeypatch.setattr(
+        "agentic_editor.gemma4.init_chat_model",
+        lambda **kwargs: BlockingChatModel(),
+    )
+
+    receiver = Gemma4AsrReceiver({}, document="Gemma")
+
+    assert analysis_started.wait(timeout=2)
+    assert not receiver._analysis_future.done()
+    allow_analysis_to_finish.set()
+    assert receiver._analysis_future.result(timeout=2)[-1].content == "Names: Gemma."
+
+
+def test_gemma4_starts_analysis_and_reuses_its_conversation(monkeypatch):
     captured_init_kwargs = {}
     fake_model = FakeChatModel()
 
@@ -40,17 +64,12 @@ def test_gemma4_uses_config_block_and_caches_document_analysis(monkeypatch):
                 "temperature": 0.25,
                 "extra_body": {"top_k": 20},
             }
-        }
+        },
+        document="Laura said drop the balls.",
     )
 
-    first = receiver.transcribe_audio(
-        np.zeros(16, dtype=np.float32),
-        document="Laura said drop the balls.",
-    )
-    second = receiver.transcribe_audio(
-        np.ones(8, dtype=np.float32) * 0.1,
-        document="Laura said drop the balls.",
-    )
+    first = receiver.transcribe_audio(np.zeros(16, dtype=np.float32))
+    second = receiver.transcribe_audio(np.ones(8, dtype=np.float32) * 0.1)
 
     assert first == "Change Laura said drop the balls to Laura said drop the ball."
     assert second == first
@@ -99,11 +118,8 @@ def test_gemma4_defaults_to_local_vllm_openai_adapter(monkeypatch):
 
     monkeypatch.setattr("agentic_editor.gemma4.init_chat_model", fake_init_chat_model)
 
-    receiver = Gemma4AsrReceiver({})
-    result = receiver.transcribe_audio(
-        np.zeros(4, dtype=np.float32),
-        document="Gemma",
-    )
+    receiver = Gemma4AsrReceiver({}, document="Gemma")
+    result = receiver.transcribe_audio(np.zeros(4, dtype=np.float32))
 
     assert result == "Change Gemma to Gemma 4."
     assert captured_init_kwargs["model"] == "google/gemma-4-E4B-it"
@@ -126,10 +142,11 @@ def test_gemma4_writes_debug_audio_fragments(monkeypatch, tmp_path):
     )
 
     debug_dir = tmp_path / "logs"
-    receiver = Gemma4AsrReceiver({}, debug_audio_dir=debug_dir)
+    receiver = Gemma4AsrReceiver(
+        {}, document="Gemma", debug_audio_dir=debug_dir
+    )
     receiver.transcribe_audio(
-        np.array([0.0, 0.25, -0.25, 0.5], dtype=np.float32),
-        document="Gemma",
+        np.array([0.0, 0.25, -0.25, 0.5], dtype=np.float32)
     )
 
     outputs = sorted(debug_dir.glob("gemma4_fragment_*.wav"))

@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import io
 import logging
 import wave
-from dataclasses import dataclass
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
 import numpy as np
 from langchain.chat_models import init_chat_model
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 _DEFAULT_MODEL_NAME = "openai:google/gemma-4-E4B-it"
 _DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
@@ -63,12 +62,6 @@ If the speaker says "Change Linda said drop the balls to Linda said drop the bal
 output:
 Change Laura said drop the balls to Laura said drop the ball.
 """
-
-
-@dataclass(frozen=True)
-class _AnalysisCacheEntry:
-    prompt_text: str
-    response_text: str
 
 
 class AudioWebSocketBuffer:
@@ -150,6 +143,7 @@ class Gemma4AsrReceiver:
         self,
         config: dict[str, Any] | None = None,
         *,
+        document: str,
         debug_audio_dir: str | Path | None = None,
     ) -> None:
         config = config or {}
@@ -170,8 +164,6 @@ class Gemma4AsrReceiver:
 
         self._llm_lock = Lock()
         self._llm = None
-        self._analysis_lock = Lock()
-        self._analysis_cache: dict[str, _AnalysisCacheEntry] = {}
         self._model_init_kwargs = self._build_model_init_kwargs(gemma4_config)
         self._debug_audio_dir = (
             Path(debug_audio_dir).expanduser()
@@ -180,6 +172,13 @@ class Gemma4AsrReceiver:
         )
         self._debug_audio_lock = Lock()
         self._debug_audio_counter = 0
+        self._analysis_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="gemma4-analysis",
+        )
+        self._analysis_future: Future[list[BaseMessage]] = (
+            self._analysis_executor.submit(self._analyze_document, document)
+        )
 
     def create_buffer(self) -> AudioWebSocketBuffer:
         return AudioWebSocketBuffer()
@@ -237,40 +236,25 @@ class Gemma4AsrReceiver:
     def _analysis_prompt_text(self, reference_document: str) -> str:
         return _ANALYSIS_USER_PROMPT_TEMPLATE.format(reference_document=reference_document)
 
-    def _analysis_cache_key(self, prompt_text: str) -> str:
-        return hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
-
-    def _invoke_text(self, messages: list[BaseMessage]) -> str:
+    def _invoke(self, messages: list[BaseMessage]) -> BaseMessage:
         llm = self._ensure_llm()
         response = llm.invoke(messages, max_tokens=self.max_new_tokens)
         if not isinstance(response, BaseMessage):
             raise RuntimeError("Chat model returned an unexpected response type")
-        return _extract_text(response)
+        return response
 
-    def _get_document_analysis(self, document: str) -> _AnalysisCacheEntry:
+    def _invoke_text(self, messages: list[BaseMessage]) -> str:
+        return _extract_text(self._invoke(messages))
+
+    def _analyze_document(self, document: str) -> list[BaseMessage]:
         reference_document = self._reference_document(document)
         prompt_text = self._analysis_prompt_text(reference_document)
-        cache_key = self._analysis_cache_key(prompt_text)
-        cached = self._analysis_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-        with self._analysis_lock:
-            cached = self._analysis_cache.get(cache_key)
-            if cached is not None:
-                return cached
-            response_text = self._invoke_text(
-                [
-                    SystemMessage(content=_SYSTEM_PROMPT),
-                    HumanMessage(content=prompt_text),
-                ]
-            )
-            entry = _AnalysisCacheEntry(
-                prompt_text=prompt_text,
-                response_text=response_text,
-            )
-            self._analysis_cache[cache_key] = entry
-            return entry
+        messages: list[BaseMessage] = [
+            SystemMessage(content=_SYSTEM_PROMPT),
+            HumanMessage(content=prompt_text),
+        ]
+        response = self._invoke(messages)
+        return [*messages, response]
 
     def _audio_message(self, audio: np.ndarray) -> HumanMessage:
         wav_base64 = _encode_wav_base64(audio, self.sample_rate)
@@ -297,22 +281,15 @@ class Gemma4AsrReceiver:
         output_path = audio_dir / f"gemma4_fragment_{file_index:04d}.wav"
         output_path.write_bytes(wav_bytes)
 
-    def transcribe_audio(self, audio: np.ndarray, *, document: str) -> str:
+    def transcribe_audio(self, audio: np.ndarray) -> str:
         waveform = _coerce_float32_mono(audio)
         max_samples = int(round(self.max_audio_seconds * self.sample_rate))
         if len(waveform) > max_samples:
             waveform = waveform[:max_samples]
         self._write_debug_audio(waveform)
 
-        analysis = self._get_document_analysis(document)
-        return self._invoke_text(
-            [
-                SystemMessage(content=_SYSTEM_PROMPT),
-                HumanMessage(content=analysis.prompt_text),
-                AIMessage(content=analysis.response_text),
-                self._audio_message(waveform),
-            ]
-        )
+        analysis_conversation = self._analysis_future.result()
+        return self._invoke_text([*analysis_conversation, self._audio_message(waveform)])
 
 
 __all__ = ["AudioWebSocketBuffer", "Gemma4AsrReceiver"]

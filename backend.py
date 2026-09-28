@@ -405,6 +405,7 @@ def create_app(
 
                     app.state.asr_receiver = Gemma4AsrReceiver(
                         app.state.asr_config,
+                        document=app.state.document_state.document,
                         debug_audio_dir=app.state.gemma4_debug_audio_dir,
                     )
                 receiver = app.state.asr_receiver
@@ -428,7 +429,6 @@ def create_app(
                             instructions = await run_in_threadpool(
                                 receiver.transcribe_audio,
                                 buffer.to_float32(),
-                                document=app.state.document_state.document,
                             )
                             await websocket.send_json(
                                 {"type": "result", "instructions": instructions}

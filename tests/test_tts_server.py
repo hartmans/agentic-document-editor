@@ -206,9 +206,8 @@ def test_asr_websocket_returns_transcription(document_state, sample_document):
 
             return AudioWebSocketBuffer()
 
-        def transcribe_audio(self, audio, *, document: str):
+        def transcribe_audio(self, audio):
             assert isinstance(audio, np.ndarray)
-            assert "Hello world." in document
             return "replace hello with hi"
 
     app = backend.create_app(document_state, path, config={}, asr_receiver=FakeAsrReceiver())
