@@ -6,8 +6,6 @@ import { fetchAsrConfig, type AsrConfigResponse, type SttToken } from "./api";
 
 export interface SpeechToTextProps {
   sampleRate: number;
-  getRms: () => number;
-  vadThreshold: number;
   onFinal: (text: string) => void;
   onStop: () => void;
 }
@@ -32,11 +30,8 @@ export abstract class BaseSpeechToText {
   protected readonly targetSampleRate = 16000;
   protected readonly inputGain = 1.0;
 
-  private silenceTimer: ReturnType<typeof setInterval> | null = null;
-  private stopped = false;
   private closedByParent = false;
-  private lastTranscript: number | null = null;
-  private readonly sessionStart = Date.now();
+  private inputFinished = false;
   private readonly maxQueuedSamples: number;
   private readonly resampler: StatefulResampler;
 
@@ -59,7 +54,7 @@ export abstract class BaseSpeechToText {
   }
 
   queueChunk(chunk: Float32Array, isPreroll = false) {
-    if (this.stopped || this.closedByParent) return;
+    if (this.closedByParent || this.inputFinished) return;
     this.queue.push({ data: chunk, isPreroll });
     this.queueSamples += chunk.length;
     if (this.queueSamples > this.maxQueuedSamples) {
@@ -73,18 +68,19 @@ export abstract class BaseSpeechToText {
   close() {
     this.closedByParent = true;
     this.abortController.abort();
-    this.cleanupTimers();
+    this.wakeIterator();
+  }
+
+  finish() {
+    if (this.closedByParent || this.inputFinished) return;
+    this.inputFinished = true;
     this.wakeIterator();
   }
 
   protected emitFinal(text: string) {
-    if (!this.closedByParent && !this.stopped && text) {
+    if (!this.closedByParent && text) {
       this.props.onFinal(text);
     }
-  }
-
-  protected markTranscriptActivity() {
-    this.lastTranscript = Date.now();
   }
 
   protected isClosedByParent(): boolean {
@@ -102,11 +98,9 @@ export abstract class BaseSpeechToText {
         this.wakeIterator();
       });
       transportPromise = this.startTransport(this.abortController.signal);
-      this.startIdleTimers();
-
-      while (!this.stopped && !this.closedByParent && !this.abortController.signal.aborted) {
+      while (!this.closedByParent && !this.abortController.signal.aborted) {
         const next = await this.dequeue();
-        if (!next) continue;
+        if (!next) break;
         const pcm = this.normalizeChunk(next.data);
         if (pcm.byteLength === 0) continue;
         await this.handlePcmChunk(pcm, next.isPreroll);
@@ -116,7 +110,6 @@ export abstract class BaseSpeechToText {
         console.error("STT failed", err);
       }
     } finally {
-      this.cleanupTimers();
       try {
         await this.finishTransport();
       } catch (err) {
@@ -131,35 +124,10 @@ export abstract class BaseSpeechToText {
           console.error("STT transport failed", err);
         }
       }
-      if (!this.stopped && !this.closedByParent) {
-        this.stopped = true;
+      if (!this.closedByParent) {
         this.props.onStop();
       }
     }
-  }
-
-  private startIdleTimers() {
-    this.cleanupTimers();
-    this.silenceTimer = setInterval(() => this.handleIdle(), 500);
-  }
-
-  private handleIdle() {
-    if (this.closedByParent || this.stopped) return;
-    const now = Date.now();
-    const last = this.lastTranscript ?? this.sessionStart;
-    const idleMs = now - last;
-    if (idleMs >= 10000) {
-      this.abortController.abort();
-      return;
-    }
-    if (this.lastTranscript && idleMs >= 4000 && this.props.getRms() < this.props.vadThreshold) {
-      this.abortController.abort();
-    }
-  }
-
-  private cleanupTimers() {
-    if (this.silenceTimer) clearInterval(this.silenceTimer);
-    this.silenceTimer = null;
   }
 
   private wakeIterator() {
@@ -175,7 +143,7 @@ export abstract class BaseSpeechToText {
       this.queueSamples -= item.data.length;
       return Promise.resolve(item);
     }
-    if (this.stopped || this.closedByParent || this.abortController.signal.aborted) {
+    if (this.closedByParent || this.inputFinished || this.abortController.signal.aborted) {
       return Promise.resolve(null);
     }
     return new Promise((resolve) => {
@@ -228,7 +196,6 @@ export class AwsSpeechToText extends BaseSpeechToText {
         for (const res of results) {
           const text = res.Alternatives?.[0]?.Transcript ?? "";
           if (!text) continue;
-          this.markTranscriptActivity();
           if (!res.IsPartial) {
             this.emitFinal(text);
           }
@@ -334,7 +301,6 @@ export class Gemma4SpeechToText extends BaseSpeechToText {
       }
       if (payload.type === "result") {
         this.resultReceived = true;
-        this.markTranscriptActivity();
         this.emitFinal(payload.instructions);
         this.resolveCompletion?.();
         this.resolveCompletion = null;
@@ -428,6 +394,7 @@ export class SpeechToText {
   private impl: BaseSpeechToText | null = null;
   private pendingChunks: QueuedFloatChunk[] = [];
   private closed = false;
+  private finishRequested = false;
 
   constructor(private readonly props: SpeechToTextProps) {
     void this.initialize();
@@ -449,6 +416,12 @@ export class SpeechToText {
     this.impl = null;
   }
 
+  finish() {
+    if (this.closed) return;
+    this.finishRequested = true;
+    this.impl?.finish();
+  }
+
   private async initialize() {
     try {
       const impl = await createSpeechToTextFromBackend(this.props);
@@ -461,6 +434,7 @@ export class SpeechToText {
         this.impl.queue_chunk(chunk.data, chunk.isPreroll);
       }
       this.pendingChunks = [];
+      if (this.finishRequested) this.impl.finish();
     } catch (err) {
       if (!this.closed) {
         console.error("Failed to initialize SpeechToText", err);
