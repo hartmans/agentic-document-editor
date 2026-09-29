@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 import wave
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -11,7 +12,13 @@ from typing import Any
 
 import numpy as np
 from langchain.chat_models import init_chat_model
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    message_to_dict,
+    messages_to_dict,
+)
 
 _DEFAULT_MODEL_NAME = "openai:google/gemma-4-E4B-it"
 _DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
@@ -31,8 +38,8 @@ Rules for the final instruction output:
 - Do not produce a literal transcript unless the literal wording is already the clearest instruction.
 - Resolve names, jargon, spelling, capitalization, homophones, possessives, and plurals from document context.
 - Apply speaker self-corrections so the output reflects the user's final intent.
-- Prefer imperative editing instructions that are unambiguous for a later model.
-- The instruction may talk about jumping to a position; the editing model will understand that jumping to a position means continuing reading the document from that position.
+- Make it clear whether the audio you receive is an imperative editing instruction, a repositioning request, or a question for the editing model to answer. Behavior of questions vs editing instructions is different, so be clear about that distinction.
+- The instruction may talk about jumping to a position or playing from a given point; the editing model will understand that jumping to a position means continuing reading the document from that position.
 - Do not describe the audio, reasoning, or your intermediate analysis.
 - Do not add markdown, bullets, or quotation marks unless they are part of the intended instruction.
 """
@@ -53,9 +60,9 @@ Return concise guidance only. Keep it compact but information-dense.
 
 _AUDIO_USER_PROMPT = """Use the reference document and your prior guidance to interpret the attached audio.
 
-Output only the final normalized instruction text for a future editor model. If the audio contains no instructions, output an empty string.
+Output only the final normalized prompt for a future editor model. If the audio contains no instructions, output an empty string.
 
-The output should be a clean editing instruction, not a literal transcript. Fold in self-corrections and resolve names or spelling from context.
+The output should be a clean prompt (editing instruction, question, or answer to a question that you did not see), not a literal transcript. Fold in self-corrections and resolve names or spelling from context.
 
 Example:
 If the speaker says "Change Linda said drop the balls to Linda said drop the ball. No wait, that was Laura not Linda,"
@@ -243,9 +250,6 @@ class Gemma4AsrReceiver:
             raise RuntimeError("Chat model returned an unexpected response type")
         return response
 
-    def _invoke_text(self, messages: list[BaseMessage]) -> str:
-        return _extract_text(self._invoke(messages))
-
     def _analyze_document(self, document: str) -> list[BaseMessage]:
         reference_document = self._reference_document(document)
         prompt_text = self._analysis_prompt_text(reference_document)
@@ -269,9 +273,9 @@ class Gemma4AsrReceiver:
             ]
         )
 
-    def _write_debug_audio(self, audio: np.ndarray) -> None:
+    def _write_debug_audio(self, audio: np.ndarray) -> Path | None:
         if self._debug_audio_dir is None:
-            return
+            return None
         audio_dir = self._debug_audio_dir
         audio_dir.mkdir(parents=True, exist_ok=True)
         with self._debug_audio_lock:
@@ -280,16 +284,39 @@ class Gemma4AsrReceiver:
         wav_bytes = base64.b64decode(_encode_wav_base64(audio, self.sample_rate))
         output_path = audio_dir / f"gemma4_fragment_{file_index:04d}.wav"
         output_path.write_bytes(wav_bytes)
+        return output_path
+
+    def _write_debug_conversation(
+        self,
+        audio_path: Path | None,
+        messages: list[BaseMessage],
+        response: BaseMessage,
+    ) -> None:
+        if audio_path is None:
+            return
+        payload = {
+            "model": self.model_name,
+            "max_tokens": self.max_new_tokens,
+            "messages": messages_to_dict(messages),
+            "response": message_to_dict(response),
+        }
+        audio_path.with_suffix(".json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n",
+            encoding="utf-8",
+        )
 
     def transcribe_audio(self, audio: np.ndarray) -> str:
         waveform = _coerce_float32_mono(audio)
         max_samples = int(round(self.max_audio_seconds * self.sample_rate))
         if len(waveform) > max_samples:
             waveform = waveform[:max_samples]
-        self._write_debug_audio(waveform)
+        audio_path = self._write_debug_audio(waveform)
 
         analysis_conversation = self._analysis_future.result()
-        return self._invoke_text([*analysis_conversation, self._audio_message(waveform)])
+        messages = [*analysis_conversation, self._audio_message(waveform)]
+        response = self._invoke(messages)
+        self._write_debug_conversation(audio_path, messages, response)
+        return _extract_text(response)
 
 
 __all__ = ["AudioWebSocketBuffer", "Gemma4AsrReceiver"]
