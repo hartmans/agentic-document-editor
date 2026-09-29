@@ -1,7 +1,6 @@
 """
 Agentic document editor foundation: chunk text, synthesize speech with Amazon Polly or qwen_tts,
-track timing via speech marks, and expose a FastAPI server for playback and
-interruption-to-text mapping.
+track timing via speech marks, and expose a FastAPI server for playback.
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ from uuid import uuid4
 from agentic_editor.document import (
     DocumentState,
     CharacterResumePoint,
-    ResumePoint,
     apply_document_update,
     load_document,
 )
@@ -27,13 +25,12 @@ from agentic_editor.graph import GraphState, build_graph, initial_messages, inst
 from agentic_editor.tts import (
     build_document_state,
     submit_document_audio,
-    map_elapsed_time_to_document,
 )
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 import uvicorn
 import yaml
 
@@ -66,12 +63,6 @@ class ChunkMarksResponse(BaseModel):
     marks: List[WordMarkModel]
 
 
-class InterruptionRequest(BaseModel):
-    documentId: str
-    chunk_id: int
-    elapsed_ms: int = Field(..., ge=0)
-
-
 class InstructionsRequest(BaseModel):
     baseDocumentId: str
     instructions: str
@@ -79,6 +70,7 @@ class InstructionsRequest(BaseModel):
 
 
 class InstructionsResponse(BaseModel):
+    disposition: Literal["play", "pause", "stop"]
     resumePoint: CharacterResumePoint
     documentId: str
     document: DocumentResponseModel
@@ -288,23 +280,6 @@ def create_app(
             ) for mark in marks],
         )
 
-    @app.post("/interruptions", response_model=ResumePoint)
-    def map_interruption(request: InterruptionRequest):
-        document_state = app.state.documents.get(request.documentId)
-        if document_state is None:
-            raise HTTPException(status_code=404, detail="Unknown document revision")
-        try:
-            chunk = document_state.chunks[request.chunk_id]
-        except IndexError:
-            raise HTTPException(status_code=404, detail="Unknown chunk_id") from None
-        mapping = map_elapsed_time_to_document(
-            document_state.tts_cache,
-            chunk,
-            request.chunk_id,
-            request.elapsed_ms,
-        )
-        return ResumePoint(**mapping, documentId=request.documentId)
-
     @app.post("/instructions", response_model=InstructionsResponse)
     async def handle_instructions(request: InstructionsRequest):
         async with app.state.instructions_lock:
@@ -376,6 +351,7 @@ def create_app(
         app.state.document_id = updated_document_id
         app.state.messages = output_state.messages
         return InstructionsResponse(
+            disposition=output_state.disposition,
             resumePoint=updated_resume_point,
             documentId=updated_document_id,
             document=_build_document_response(updated_state),

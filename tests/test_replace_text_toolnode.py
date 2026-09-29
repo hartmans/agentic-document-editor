@@ -9,7 +9,12 @@ from langgraph.types import Command
 
 from agentic_editor.document import DocumentState
 from agentic_editor.graph import DocumentUpdate
-from agentic_editor.tools import replace_text, reposition_playback
+from agentic_editor.tools import (
+    pause_playback,
+    replace_text,
+    reposition_playback,
+    stop_playback,
+)
 
 
 class StubTtsCache:
@@ -120,6 +125,57 @@ def test_reposition_playback_closes_tool_turn_and_sets_response_text():
         "text": "continue.",
     }
     assert update["messages"][1] == AIMessage(content="Resuming there.")
+
+
+def test_pause_playback_sets_message_and_disposition():
+    ai_msg = AIMessage(
+        content="",
+        tool_calls=[{
+            "id": "call_1",
+            "name": pause_playback.name,
+            "args": {"message": "Please answer this question."},
+        }],
+    )
+
+    result = ToolNode([pause_playback]).invoke(
+        {"messages": [ai_msg]},
+        runtime=Runtime(),
+    )
+
+    assert isinstance(result, list)
+    command = result[0]
+    assert command.goto == "final"
+    assert command.update["disposition"] == "pause"
+    assert command.update["response_text"] == "Please answer this question."
+    tool_message, assistant_message = command.update["messages"]
+    assert isinstance(tool_message, ToolMessage)
+    assert tool_message.content == "Please answer this question."
+    assert tool_message.tool_call_id == "call_1"
+    assert assistant_message == AIMessage(content="Please answer this question.")
+
+
+def test_stop_playback_takes_no_message_and_announces_how_to_resume():
+    assert "message" not in stop_playback.args
+    ai_msg = AIMessage(
+        content="",
+        tool_calls=[{"id": "call_1", "name": stop_playback.name, "args": {}}],
+    )
+
+    result = ToolNode([stop_playback]).invoke(
+        {"messages": [ai_msg]},
+        runtime=Runtime(),
+    )
+
+    command = result[0]
+    message = "Playback stopped. Press Continue to resume."
+    assert command.goto == "final"
+    assert command.update["disposition"] == "stop"
+    assert command.update["response_text"] == message
+    tool_message, assistant_message = command.update["messages"]
+    assert isinstance(tool_message, ToolMessage)
+    assert tool_message.content == message
+    assert tool_message.tool_call_id == "call_1"
+    assert assistant_message == AIMessage(content=message)
 
 
 def test_replace_text_searches_the_current_mutable_document():

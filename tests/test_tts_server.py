@@ -67,18 +67,9 @@ def test_api_endpoints(document_state, sample_document):
     audio_resp = client.get(f"/chunks/{document_id}/0/audio")
     assert audio_resp.status_code == 200
     assert audio_resp.content  # audio bytes present
+    assert client.post("/interruptions", json={}).status_code == 404
 
-    interrupt_resp = client.post("/interruptions", json={
-        "documentId": document_id, "chunk_id": 0, "elapsed_ms": 0,
-    })
-    assert interrupt_resp.status_code == 200
-    interrupt = interrupt_resp.json()
-    assert interrupt["chunkId"] == 0
-    assert interrupt["docCharPosition"] >= 0
-    assert interrupt["documentId"] == document_id
-
-
-def test_historical_revision_audio_and_interruption(document_state, sample_document):
+def test_historical_revision_audio(document_state, sample_document):
     path, _ = sample_document
     app = backend.create_app(document_state, path, config={})
     client = TestClient(app)
@@ -97,14 +88,6 @@ def test_historical_revision_audio_and_interruption(document_state, sample_docum
     audio = client.get(f"/chunks/{original_id}/0/audio")
     assert audio.status_code == 200
     assert audio.content == document_state.tts_cache[document_state.chunks[0].text][0]
-    point = client.post("/interruptions", json={
-        "documentId": original_id, "chunk_id": 0, "elapsed_ms": 1000,
-    })
-    expected = map_elapsed_time_to_document(
-        document_state.tts_cache, document_state.chunks[0], 0, 1000,
-    )
-    assert point.status_code == 200
-    assert point.json() == {**expected, "documentId": original_id}
 
 
 def test_instructions_recheck_revision_after_waiting(document_state, sample_document):

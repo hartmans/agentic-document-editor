@@ -129,6 +129,57 @@ def reposition_playback(
     goto='final')
 
 
+def _finish_playback_action(message: str, disposition: str, tool_call_id: str) -> Command:
+    return Command(
+        update={
+            "disposition": disposition,
+            "response_text": message,
+            "messages": [
+                ToolMessage(content=message, tool_call_id=tool_call_id),
+                AIMessage(content=message),
+            ],
+        },
+        goto="final",
+    )
+
+
+@tool(infer_schema=True, parse_docstring=True)
+def pause_playback(
+    message: str,
+    *,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
+    """Pause playback, end this interaction, and present a message to the user.
+
+    Use this tool when the editor needs the user to explicitly answer a question,
+    or when the user explicitly directs you to pause playback. Voice activity
+    detection remains armed while playback is paused.
+
+    Args:
+        message: The final response presented to the user.
+    """
+    return _finish_playback_action(message, "pause", tool_call_id)
+
+
+@tool(infer_schema=True)
+def stop_playback(
+    *,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
+    """Stop playback, end this interaction, and announce how to resume.
+
+    Use this tool only when the user explicitly asks to end their editing session.
+    Stopping disarms voice activity detection, so the user must interact with their
+    device to resume. Unless the user explicitly asks to end editing, use
+    pause_playback instead.
+    """
+    return _finish_playback_action(
+        "Playback stopped. Press Continue to resume.",
+        "stop",
+        tool_call_id,
+    )
+
+
 @tool(infer_schema=True, parse_docstring=True)
 def read_document(
     position: Annotated[int, Field(ge=0)] = 0,
@@ -182,8 +233,10 @@ def search_document(
 
 __all__ = [
     "document_excerpt",
+    "pause_playback",
     "read_document",
     "replace_text",
     "reposition_playback",
     "search_document",
+    "stop_playback",
 ]

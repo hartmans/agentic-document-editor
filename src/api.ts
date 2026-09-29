@@ -72,6 +72,7 @@ export interface InstructionsRequest {
 }
 
 export interface InstructionsResponse {
+  disposition: "play" | "pause" | "stop";
   resumePoint: ResumePoint;
   documentId: string;
   document: DocumentResponse;

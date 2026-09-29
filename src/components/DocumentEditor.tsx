@@ -17,6 +17,7 @@ interface DocumentSnapshot {
 
 interface ResponsePlayback extends DocumentSnapshot {
   intent: number;
+  disposition: "play" | "pause" | "stop";
 }
 
 export function DocumentEditor() {
@@ -97,6 +98,16 @@ export function DocumentEditor() {
     setVoiceMode("idle");
   };
 
+  const handlePause = () => {
+    const intent = ++intentRef.current;
+    const info = playbackRef.current?.stop();
+    if (playing || startingRef.current) rememberInterruption(info, intent);
+    startingRef.current = false;
+    setStarting(false);
+    clearResponse();
+    setVoiceMode("armed");
+  };
+
   const handleInterrupt = () => {
     if (instructionRef.current) return;
     const intent = ++intentRef.current;
@@ -140,6 +151,7 @@ export function DocumentEditor() {
           documentId: result.responseDocumentId,
           document: result.responseDocument,
           intent,
+          disposition: result.disposition,
         });
       }
     } catch (err) {
@@ -171,7 +183,14 @@ export function DocumentEditor() {
   };
 
   const handleResponseEnd = () => {
-    if (response && response.intent === intentRef.current) void handlePlay();
+    if (!response || response.intent !== intentRef.current) return;
+    if (response.disposition === "play") {
+      void handlePlay();
+    } else if (response.disposition === "pause") {
+      setVoiceMode("armed");
+    } else {
+      setVoiceMode("idle");
+    }
   };
 
   const handleDocumentPlayingChange = (isPlaying: boolean) => {
@@ -180,7 +199,7 @@ export function DocumentEditor() {
   };
 
   const handleResponsePlayingChange = (isPlaying: boolean) => {
-    if (isPlaying) setVoiceMode("armed");
+    if (isPlaying && response?.disposition !== "stop") setVoiceMode("armed");
   };
 
   useEffect(() => {
@@ -225,6 +244,9 @@ export function DocumentEditor() {
       <div style={{ display: "flex", gap: "0.5rem" }}>
         <button onClick={handlePlay} disabled={playing || starting || instructionsPending}>
           Play
+        </button>
+        <button onClick={handlePause} disabled={!playing && !starting && !response}>
+          Pause
         </button>
         <button onClick={handleStop} disabled={voiceMode === "idle" && !starting && !response}>
           Stop
