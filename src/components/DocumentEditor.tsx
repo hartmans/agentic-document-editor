@@ -67,7 +67,6 @@ export function DocumentEditor() {
       const resume = resumePointRef.current;
       if (!mountedRef.current || intent !== intentRef.current) return;
       if (!playbackRef.current) throw new Error("Playback not ready. Enable microphone and wait a moment.");
-      setVoiceMode("armed");
       await playbackRef.current.play(resume ?? undefined);
       // The player reports actual starts. A cancelled play must not set playing.
     } catch (err) {
@@ -142,7 +141,6 @@ export function DocumentEditor() {
           document: result.responseDocument,
           intent,
         });
-        setVoiceMode("armed");
       }
     } catch (err) {
       if (!isCurrent()) return;
@@ -176,6 +174,15 @@ export function DocumentEditor() {
     if (response && response.intent === intentRef.current) void handlePlay();
   };
 
+  const handleDocumentPlayingChange = (isPlaying: boolean) => {
+    setPlaying(isPlaying);
+    if (isPlaying) setVoiceMode("armed");
+  };
+
+  const handleResponsePlayingChange = (isPlaying: boolean) => {
+    if (isPlaying) setVoiceMode("armed");
+  };
+
   useEffect(() => {
     // Reposition instructions can intentionally have no spoken response.
     if (response && response.document.chunks.length === 0) handleResponseEnd();
@@ -201,6 +208,7 @@ export function DocumentEditor() {
           documentText={response.document.document}
           chunks={response.document.chunks}
           autoPlay
+          onPlayingChange={handleResponsePlayingChange}
           onNaturalEnd={handleResponseEnd}
           key={`response/${response.documentId}/${response.intent}`}
         />
@@ -212,7 +220,7 @@ export function DocumentEditor() {
         documentText={doc.document}
         chunks={doc.chunks}
         key={documentId}
-        onPlayingChange={setPlaying}
+        onPlayingChange={handleDocumentPlayingChange}
       />
       <div style={{ display: "flex", gap: "0.5rem" }}>
         <button onClick={handlePlay} disabled={playing || starting || instructionsPending}>
