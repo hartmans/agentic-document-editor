@@ -1,4 +1,5 @@
 import base64
+import json
 import threading
 import wave
 
@@ -156,3 +157,15 @@ def test_gemma4_writes_debug_audio_fragments(monkeypatch, tmp_path):
         assert wav_file.getnchannels() == 1
         assert wav_file.getsampwidth() == 2
         assert wav_file.getnframes() == 4
+
+    conversations = sorted(debug_dir.glob("gemma4_fragment_*.json"))
+    assert len(conversations) == 1
+    conversation = json.loads(conversations[0].read_text(encoding="utf-8"))
+    assert conversation["model"] == receiver.model_name
+    assert conversation["response"]["data"]["content"] == "Change Gemma to Gemma 4."
+    serialized_messages = json.dumps(conversation["messages"])
+    assert "Reference document:" in serialized_messages
+    assert "Gemma" in serialized_messages
+    audio_blocks = conversation["messages"][-1]["data"]["content"]
+    audio_block = next(block for block in audio_blocks if block["type"] == "audio")
+    assert base64.b64decode(audio_block["base64"])
