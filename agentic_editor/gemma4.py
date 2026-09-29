@@ -32,7 +32,15 @@ _MAX_NEW_TOKENS = 2048
 _SYSTEM_PROMPT = """You normalize spoken document-editing requests into precise instructions for a future editor model.
 
 When you receive the reference document by itself, prepare guidance that will help disambiguate later audio.
-When you receive audio, output only the final normalized instruction text that the future editor model should follow.
+When you receive audio, confirm it starts with the wake up phrase. If so, output only the final normalized instruction text that the future editor model should follow. If not, output an empty message.
+
+
+
+The wakeup phrase is "Editor,". Examples of wakeup phrase handling:
+You hear "Editor, change Linda to Laura." You output "Change Linda to Laura."
+You hear "The cat is cute." You output an empty message.
+You hear "Editor, is the speaker in the last paragraph clear?" You output "Is the speaker in the last paragraph clear?"
+
 
 Rules for the final instruction output:
 - Do not produce a literal transcript unless the literal wording is already the clearest instruction.
@@ -60,7 +68,7 @@ Return concise guidance only. Keep it compact but information-dense.
 
 _AUDIO_USER_PROMPT = """Use the reference document and your prior guidance to interpret the attached audio.
 
-Output only the final normalized prompt for a future editor model. If the audio contains no instructions, output an empty string.
+Output only the final normalized prompt for a future editor model. If the audio contains no instructions, output an empty string. If the wakeup phrase is not present, output an empty string. 
 
 The output should be a clean prompt (editing instruction, question, or answer to a question that you did not see), not a literal transcript. Fold in self-corrections and resolve names or spelling from context.
 
