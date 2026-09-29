@@ -335,19 +335,14 @@ class QwenTtsCache(AbstractTtsCache):
         audio = self._load_audio_path(sample_path)
         with self._whisperx_lock:
             asr_model = self._ensure_asr_model()
-            with _torch_load_with_weights_only_disabled():
-                transcription = asr_model.transcribe(
-                    audio,
-                    batch_size=10,
-                    language=self.whisperx_language,
-                )
-        transcript = " ".join(
-            segment["text"].strip()
-            for segment in transcription.get("segments", [])
-            if segment.get("text")
-        ).strip()
+            segments, _ = asr_model.transcribe(
+                audio,
+                language=self.whisperx_language,
+                condition_on_previous_text=False,
+            )
+            transcript = " ".join(segment.text.strip() for segment in segments).strip()
         if not transcript:
-            raise RuntimeError("WhisperX returned an empty transcript for the voice sample")
+            raise RuntimeError("Faster Whisper returned an empty transcript for the voice sample")
         transcript_path.write_text(transcript, encoding="utf-8")
         return transcript
 
@@ -465,14 +460,13 @@ class QwenTtsCache(AbstractTtsCache):
         with self._load_lock:
             if self._asr_model is not None:
                 return self._asr_model
-            _register_omegaconf_safe_globals()
-            with _torch_load_with_weights_only_disabled():
-                self._asr_model = whisperx.load_model(
-                    self.whisperx_model_name,
-                    self.whisperx_device,
-                    compute_type="default",
-                    language=self.whisperx_language,
-                )
+            from faster_whisper import WhisperModel
+
+            self._asr_model = WhisperModel(
+                self.whisperx_model_name,
+                device=self.whisperx_device,
+                compute_type="default",
+            )
             return self._asr_model
 
     def _ensure_align_model(self):
