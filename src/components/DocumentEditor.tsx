@@ -121,7 +121,10 @@ export function DocumentEditor() {
   const handleInstructions = async (instructions: string) => {
     if (instructionRef.current || !snapshot) return;
     const trimmed = instructions.trim();
-    if (!trimmed) return;
+    if (!trimmed) {
+      void handlePlay();
+      return;
+    }
     const operation = {};
     instructionRef.current = operation;
     const intent = intentRef.current;
