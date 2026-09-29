@@ -62,3 +62,12 @@ function Span(el)
   -- Otherwise, leave unchanged
   return el
 end
+
+function Para(el)
+  local text = normalize_punctuation(pandoc.utils.stringify(el.content))
+  local _, double_quotes = text:gsub('"', '')
+  if double_quotes % 2 == 1 then
+    el.content:insert(pandoc.Str('"'))
+  end
+  return el
+end
