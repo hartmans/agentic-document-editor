@@ -14,7 +14,8 @@ interface VoiceInputProps {
 
 /**
  * Uses Silero VAD with the shared mic stream while retaining the explicit
- * 250 ms preroll ring used by both speech backends.
+ * 650 ms preroll ring used by both speech backends. This covers the VAD's
+ * 400 ms speech confirmation delay and audio processing latency.
  */
 export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: VoiceInputProps) {
   const { audioContext, micStream } = useContext(AudioCtx);
@@ -30,7 +31,7 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const enabledRef = useRef(enabled);
   const triggeredRef = useRef(false);
-  const prerollBufferRef = useRef<Float32Array>(new Float32Array(12000));
+  const prerollBufferRef = useRef<Float32Array>(new Float32Array(31200));
   const prerollWriteIdxRef = useRef(0);
 
   const appendInstruction = (text: string) => {
@@ -106,6 +107,7 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
       model: "v6",
       audioContext,
       startOnLoad: false,
+      minSpeechMs: 400,
       preSpeechPadMs: 0,
       baseAssetPath: "/vad/",
       onnxWASMBasePath: "/vad/",
@@ -113,7 +115,7 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
       pauseStream: async () => {},
       resumeStream: async () => micStream,
       onFrameProcessed: ({ isSpeech }) => setSpeechProbability(isSpeech),
-      onSpeechStart: beginSpeech,
+      onSpeechRealStart: beginSpeech,
       onSpeechEnd: finishSpeech,
       onVADMisfire: finishSpeech,
     }).then(async (vad) => {
@@ -145,7 +147,7 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
     if (!audioContext || !micStream || processorRef.current) return;
     const source = audioContext.createMediaStreamSource(micStream);
     sourceRef.current = source;
-    const prerollSamples = Math.max(1, Math.round(audioContext.sampleRate * 0.25));
+    const prerollSamples = Math.max(1, Math.round(audioContext.sampleRate * 0.65));
     prerollBufferRef.current = new Float32Array(prerollSamples);
     prerollWriteIdxRef.current = 0;
 
