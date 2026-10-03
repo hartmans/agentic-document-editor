@@ -3,12 +3,19 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
 from .speech_marks import SpeechMark
-from .tts_cache import TtsCache
+from .text_alignment import WordCorrespondence
+from .speech import SpeechService
+
+if TYPE_CHECKING:
+    from radio_drama import AudioPlan, DialogueLine
+else:
+    # These objects are runtime resources, not part of document-tool schemas.
+    AudioPlan = DialogueLine = Any
 
 @dataclass
 class DocumentUpdate:
@@ -78,12 +85,18 @@ class TextChunk:
     text: str
     doc_char_start: int
     doc_char_end: int
-    audio_mime_type: str = "audio/mpeg"
+    audio_mime_type: str = "audio/wav"
+    filtered_text: str = ""
+    dialogue_lines: List[DialogueLine] = field(default_factory=list)
+    word_correspondences: List[WordCorrespondence] = field(default_factory=list)
+    plan: AudioPlan | None = None
 
 
 class CharacterResumePoint(BaseModel):
     docCharPosition: int = Field(ge=0)
     documentId: str | None = None
+    chunkId: int | None = Field(default=None, ge=0)
+    offsetMs: float | None = Field(default=None, ge=0, allow_inf_nan=False)
 
 
 class ResumePoint(BaseModel):
@@ -99,10 +112,9 @@ class DocumentState:
 
     document:str #: Original text of the document
     voice_id: str
-    tts_cache: TtsCache
+    speech: SpeechService | None = None
     chunks: List[TextChunk] = field(default_factory=list)
-    aws_session: object | None = None  # boto3.Session | None, kept loose to avoid hard dep
-    region_name: str | None = None
+    aws_session: object | None = None  # Only for the AWS Transcribe credential endpoint.
 
     def find_chunk_id(self, position: int) -> int:
         if not self.chunks:
@@ -629,12 +641,8 @@ def chunk_documents(document: str) -> List[tuple[int, int]]:
             if search_start >= doc_len:
                 end = doc_len
             else:
-                candidate_end = doc_len
-                while whitespace_match := re.finditer(r"\s", document[search_start:]):
-                    whitespace_end = match.end+search_start
-                    if whitespace_end < window_end:
-                        candidate_end = whitespace_end
-                end = candidate_end
+                breaks = list(re.finditer(r"\s", document[search_start:window_end]))
+                end = search_start + breaks[-1].end() if breaks else window_end
 
         if doc_len - end < min_chunk_size:
             end = doc_len
@@ -653,12 +661,12 @@ def apply_document_update(update: str, state: DocumentState) -> DocumentState:
     updated_document = update
     from agentic_editor.tts import build_document_state
 
-    return build_document_state(
+    updated = build_document_state(
         document_text=updated_document,
-        submit_audio=False,
-        tts_cache=state.tts_cache,
-        session=state.aws_session,  # type: ignore
+        speech=state.speech,
     )
+    updated.aws_session = state.aws_session
+    return updated
 
 
 def load_document(path: Path) -> str:

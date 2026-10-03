@@ -1,6 +1,8 @@
 import type { DocumentChunk, WordMark } from "../api";
 
-export function chunkForPosition(chunks: DocumentChunk[], position: number): number {
+export function chunkForPosition(
+  chunks: Pick<DocumentChunk, "chunk_id" | "doc_char_end">[], position: number,
+): number {
   const chunk = chunks.find((chunk) => position < chunk.doc_char_end);
   return chunk?.chunk_id ?? chunks[chunks.length - 1]?.chunk_id ?? 0;
 }

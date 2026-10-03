@@ -17,10 +17,6 @@ from agentic_editor.tools import (
 )
 
 
-class StubTtsCache:
-    def __getitem__(self, text: str):
-        raise AssertionError("replace_text should not access TTS cache")
-
 
 @pytest.mark.parametrize(("position", "change_start", "expected_position"), [
     (200, 100, 100),  # Rewind to an earlier change.
@@ -37,7 +33,6 @@ def test_replace_text_toolnode_executes(position, change_start, expected_positio
     doc_state = DocumentState(
         document=document,
         voice_id="Joanna",
-        tts_cache=StubTtsCache(),
     )
     tool_node = ToolNode([replace_text])
 
@@ -90,7 +85,6 @@ def test_reposition_playback_closes_tool_turn_and_sets_response_text():
     doc_state = DocumentState(
         document=document,
         voice_id="Joanna",
-        tts_cache=StubTtsCache(),
     )
     tool_node = ToolNode([reposition_playback])
     ai_msg = AIMessage(
@@ -184,7 +178,6 @@ def test_replace_text_searches_the_current_mutable_document():
     doc_state = DocumentState(
         document=original,
         voice_id="Joanna",
-        tts_cache=StubTtsCache(),
     )
     ai_msg = AIMessage(
         content="",

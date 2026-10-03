@@ -1,4 +1,5 @@
 import operator
+import asyncio
 import os
 import json
 import typing
@@ -129,7 +130,9 @@ async def final(state:GraphState)-> dict:
     results['document'] = None
     assert state.document_state
     if state.document and (state.document != state.document_state.document):
-        results['document_state'] = apply_document_update(state.document, state.document_state)
+        results['document_state'] = await asyncio.to_thread(
+            apply_document_update, state.document, state.document_state,
+        )
     return results
 
 async def our_tool_node(state:GraphState, runtime:Runtime) -> Command | typing.Sequence[Command]:

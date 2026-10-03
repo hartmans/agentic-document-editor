@@ -142,6 +142,8 @@ export function DocumentEditor() {
         resumePoint: {
           documentId: snapshot.documentId,
           docCharPosition: point?.docCharPosition ?? 0,
+          chunkId: point?.chunkId,
+          offsetMs: point?.offsetMs,
         },
       });
       if (!isCurrent()) return;

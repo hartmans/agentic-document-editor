@@ -3,16 +3,11 @@ import json
 from agentic_editor.document import DocumentState
 
 
-class StubTtsCache:
-    def __getitem__(self, text: str):
-        raise AssertionError("search_text should not access TTS cache")
-
 
 def _state(document: str) -> DocumentState:
     return DocumentState(
         document=document,
         voice_id="Joanna",
-        tts_cache=StubTtsCache(),
     )
 
 

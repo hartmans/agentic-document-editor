@@ -13,11 +13,13 @@ import { AudioEngine } from "../audio/AudioEngine";
 import { AudioCtx } from "../context/AudioContextProvider";
 import { ResumePoint, WordMark, fetchChunkAudio, fetchChunkMarks } from "../api";
 import { chunkForPosition, markAtTime, timeAtPosition } from "../audio/speechMarks";
+import { marksForStart } from "../audio/playbackReadiness";
 
 export interface ChunkRef {
   chunk_id: number;
   doc_char_start: number;
   doc_char_end: number;
+  has_audio?: boolean;
 }
 
 export interface DocumentPlaybackHandle {
@@ -53,6 +55,7 @@ export function DocumentPlayback({
     const generationRef = useRef(0);
     const pendingStartRef = useRef<ResumePoint | null>(null);
     const marksRef = useRef<Map<string, WordMark[]>>(new Map());
+    const pendingMarksRef = useRef<Map<string, Promise<WordMark[]>>>(new Map());
     const lastPositionRef = useRef<ResumePoint>({ documentId, docCharPosition: 0 });
     const [highlight, setHighlight] = useState<WordMark | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -100,12 +103,18 @@ export function DocumentPlayback({
       const key = `${documentId}/${chunkId}`;
       const cached = marksRef.current.get(key);
       if (cached) return cached;
-      const result = await fetchChunkMarks(documentId, chunkId);
-      if (result.documentId !== documentId || result.chunkId !== chunkId) {
-        throw new Error("Speech marks belong to another document chunk");
+      let pending = pendingMarksRef.current.get(key);
+      if (!pending) {
+        pending = fetchChunkMarks(documentId, chunkId).then((result) => {
+          if (result.documentId !== documentId || result.chunkId !== chunkId) {
+            throw new Error("Speech marks belong to another document chunk");
+          }
+          marksRef.current.set(key, result.marks);
+          return result.marks;
+        }).finally(() => pendingMarksRef.current.delete(key));
+        pendingMarksRef.current.set(key, pending);
       }
-      marksRef.current.set(key, result.marks);
-      return result.marks;
+      return pending;
     }
 
     async function loadBuffer(chunkId: number): Promise<AudioBuffer> {
@@ -120,18 +129,44 @@ export function DocumentPlayback({
     }
 
     async function startChunk(chunkId: number, docCharPosition: number,
-                              generation = generationRef.current) {
+                              generation = generationRef.current, knownOffsetMs?: number) {
       if (!audioEngineRef.current || !audioContext) return;
-      pendingStartRef.current = { documentId, docCharPosition };
+      if (chunks[chunkId].has_audio === false) {
+        handleNaturalEnd(chunkId, generation);
+        return;
+      }
+      pendingStartRef.current = { documentId, docCharPosition, chunkId, offsetMs: knownOffsetMs };
       setError(null);
       try {
-        const marks = await loadMarks(chunkId);
-        if (generation !== generationRef.current) return;
+        // Handle rejection immediately even when audio starts without awaiting
+        // timing. The animation loop picks up late marks at the current time.
+        const marksResult = loadMarks(chunkId).then(
+          (marks) => ({ marks, error: null }),
+          (error: Error) => ({ marks: [] as WordMark[], error }),
+        );
         const buffer = await loadBuffer(chunkId);
         if (generation !== generationRef.current) return;
+        const needsTiming = knownOffsetMs === undefined && docCharPosition > chunks[chunkId].doc_char_start;
+        const marks = await marksForStart(
+          docCharPosition, chunks[chunkId].doc_char_start, knownOffsetMs, marksResult,
+          marksRef.current.get(`${documentId}/${chunkId}`) ?? [],
+        );
+        if (generation !== generationRef.current) return;
+        if (!needsTiming) {
+          void marksResult.then((result) => {
+            if (result.error && generation === generationRef.current
+                && audioEngineRef.current?.getCurrentPlaybackInfo().playingChunkId === chunkId) {
+              setError(`Audio timing unavailable: ${result.error.message}`);
+            }
+          });
+        }
         pendingStartRef.current = null;
         if (playingRef.current || !audioEngineRef.current) return;
-        const offsetMs = timeAtPosition(marks, docCharPosition);
+        const offsetMs = knownOffsetMs ?? (needsTiming ? timeAtPosition(marks, docCharPosition) : 0);
+        if (offsetMs / 1000 >= buffer.duration) {
+          handleNaturalEnd(chunkId, generation);
+          return;
+        }
         lastPositionRef.current = {
           documentId,
           docCharPosition: marks.length ? docCharPosition : chunks[chunkId].doc_char_start,
@@ -155,11 +190,12 @@ export function DocumentPlayback({
     }
 
     function handleNaturalEnd(finishedId: number, generation: number) {
-      const nextId = finishedId + 1;
+      let nextId = finishedId + 1;
+      while (nextId < chunks.length && chunks[nextId].has_audio === false) nextId += 1;
       if (nextId < chunks.length) {
         void startChunk(nextId, chunks[nextId].doc_char_start, generation);
       } else {
-        lastPositionRef.current = { documentId, docCharPosition: chunks[finishedId].doc_char_end };
+        lastPositionRef.current = { documentId, docCharPosition: chunks[chunks.length - 1].doc_char_end };
         playingRef.current = false;
         onPlayingChange?.(false);
         emitNaturalEnd();
@@ -180,6 +216,8 @@ export function DocumentPlayback({
         point = {
           documentId,
           docCharPosition: mark?.docCharStart ?? lastPositionRef.current.docCharPosition,
+          chunkId: info.playingChunkId,
+          offsetMs: Math.max(0, (info.contextCurrentTime - info.chunkStartTime) * 1000),
         };
       }
       lastPositionRef.current = point;
@@ -199,7 +237,8 @@ export function DocumentPlayback({
           resume?.docCharPosition ?? 0, chunks[chunks.length - 1].doc_char_end,
         ));
         const targetChunk = chunkForPosition(chunks, docPos);
-        await startChunk(targetChunk, docPos, generation);
+        const offsetMs = resume?.chunkId === targetChunk ? resume.offsetMs : undefined;
+        await startChunk(targetChunk, docPos, generation, offsetMs);
       },
       stop: () => stopPlayback(),
     }));

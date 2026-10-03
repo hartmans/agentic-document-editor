@@ -1,11 +1,12 @@
 """
-Agentic document editor foundation: chunk text, synthesize speech with Amazon Polly or qwen_tts,
-track timing via speech marks, and expose a FastAPI server for playback.
+Agentic document editor: radio_drama speech plans, independent audio and timing,
+and revision-bound document playback.
 """
 
 from __future__ import annotations
 
 import argparse
+from contextlib import asynccontextmanager
 import asyncio
 import hashlib
 import json
@@ -25,6 +26,7 @@ from agentic_editor.graph import GraphState, build_graph, initial_messages, inst
 from agentic_editor.tts import (
     build_document_state,
     submit_document_audio,
+    map_elapsed_time_to_document,
 )
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.concurrency import run_in_threadpool
@@ -42,6 +44,7 @@ class DocumentChunkModel(BaseModel):
     chunk_id: int
     doc_char_start: int
     doc_char_end: int
+    has_audio: bool
 
 
 class DocumentResponseModel(BaseModel):
@@ -110,6 +113,7 @@ def _build_document_response(document_state: DocumentState) -> DocumentResponseM
                 chunk_id=i,
                 doc_char_start=c.doc_char_start,
                 doc_char_end=c.doc_char_end,
+                has_audio=bool(c.dialogue_lines) if document_state.speech else True,
             )
             for i, c in enumerate(document_state.chunks)
         ],
@@ -184,7 +188,16 @@ def create_app(
     gemma4_debug_audio_dir: Path | None = None,
 ) -> FastAPI:
     document_id = uuid4().hex
-    app = FastAPI(title="Agentic Document TTS Server")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        try:
+            await submit_document_audio(state)
+            yield
+        finally:
+            if state.speech is not None:
+                await state.speech.close()
+
+    app = FastAPI(title="Agentic Document TTS Server", lifespan=lifespan)
     app.state.document_state = state
     app.state.document_id = document_id
     app.state.document_path = document_path
@@ -209,7 +222,7 @@ def create_app(
     @app.get("/status")
     async def status():
         document_state = app.state.document_state
-        document_response = _build_document_response(document_state).dict()
+        document_response = _build_document_response(document_state).model_dump()
         return {
             "documentId": app.state.document_id,
             "documentLength": len(document_state.document),
@@ -242,23 +255,27 @@ def create_app(
         return _build_document_response(document_state)
 
     @app.get("/chunks/{document_id}/{chunk_id}/audio")
-    def get_chunk_audio(document_id: str, chunk_id: int):
+    async def get_chunk_audio(document_id: str, chunk_id: int):
         document_state = app.state.documents.get(document_id)
         if not document_state:
             raise HTTPException(status_code=404, detail="Unknown document_id")
         try:
+            if chunk_id < 0:
+                raise IndexError
             chunk = document_state.chunks[chunk_id]
         except IndexError:
             raise HTTPException(status_code=404, detail="Unknown chunk_id") from None
         try:
-            audio_bytes, _ = document_state.tts_cache[chunk.text]
+            if document_state.speech is None:
+                raise RuntimeError("Speech is not configured")
+            audio_bytes = await document_state.speech.audio(chunk)
         except Exception as exc:
-            logging.error("Failed to load audio for chunk %s: %s", chunk_id, exc)
+            logging.exception("Failed to load audio for chunk %s: %s", chunk_id, exc)
             raise HTTPException(status_code=500, detail="Failed to synthesize audio")
         return Response(content=audio_bytes, media_type=chunk.audio_mime_type)
 
     @app.get("/chunks/{document_id}/{chunk_id}/marks", response_model=ChunkMarksResponse)
-    def get_chunk_marks(document_id: str, chunk_id: int):
+    async def get_chunk_marks(document_id: str, chunk_id: int):
         document_state = app.state.documents.get(document_id)
         if document_state is None:
             raise HTTPException(status_code=404, detail="Unknown document_id")
@@ -266,10 +283,12 @@ def create_app(
             raise HTTPException(status_code=404, detail="Unknown chunk_id")
         chunk = document_state.chunks[chunk_id]
         try:
-            _, marks = document_state.tts_cache[chunk.text]
+            if document_state.speech is None:
+                raise RuntimeError("Speech is not configured")
+            marks = await document_state.speech.marks(chunk)
         except Exception as exc:
-            logging.error("Failed to load marks for chunk %s: %s", chunk_id, exc)
-            raise HTTPException(status_code=500, detail="Failed to synthesize audio")
+            logging.exception("Failed to load marks for chunk %s: %s", chunk_id, exc)
+            raise HTTPException(status_code=500, detail="Failed to align speech")
         return ChunkMarksResponse(
             documentId=document_id,
             chunkId=chunk_id,
@@ -280,7 +299,7 @@ def create_app(
             ) for mark in marks],
         )
 
-    @app.post("/instructions", response_model=InstructionsResponse)
+    @app.post("/instructions", response_model=InstructionsResponse, response_model_exclude_none=True)
     async def handle_instructions(request: InstructionsRequest):
         async with app.state.instructions_lock:
             if request.baseDocumentId != app.state.document_id:
@@ -292,6 +311,18 @@ def create_app(
     async def process_instructions(request: InstructionsRequest):
         document_state = app.state.document_state
         resume_point = request.resumePoint
+        if resume_point.chunkId is not None and resume_point.offsetMs is not None:
+            if resume_point.chunkId >= len(document_state.chunks):
+                raise HTTPException(status_code=422, detail="Unknown resume chunk")
+            if document_state.speech is not None:
+                try:
+                    resolved = await map_elapsed_time_to_document(
+                        document_state.speech, document_state.chunks[resume_point.chunkId],
+                        resume_point.chunkId, resume_point.offsetMs,
+                    )
+                    resume_point = resume_point.model_copy(update={"docCharPosition": resolved["docCharPosition"]})
+                except Exception:
+                    logging.exception("Could not resolve interruption timing; using last known character position")
         messages = [
             *app.state.messages,
             instruction_message(
@@ -322,13 +353,11 @@ def create_app(
         )
         response_text = output_state.response_text
         response_document_id = "response-" + _sha256_text(response_text)
-        response_document_state = build_document_state(
+        response_document_state = await run_in_threadpool(build_document_state,
             document_text=response_text,
-            submit_audio=False,
-            tts_cache=document_state.tts_cache,
-            session=document_state.aws_session,
+            speech=document_state.speech,
         )
-        submit_document_audio(
+        await submit_document_audio(
             updated_state,
             position_hint=(output_state.position if output_state.position is not None
                            else resume_point.docCharPosition),
@@ -425,18 +454,11 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Path to the UTF-8 plain-text document to read.",
     )
-    parser.add_argument(
-        "--voice-id",
-        default="Ruth",
-        help="Amazon Polly VoiceId to use (default: Joanna).",
-    )
-    parser.add_argument(
-        "--region",
-        help="AWS region to use when configured.",
-    )
+    parser.add_argument("--region", help="AWS region for Transcribe.")
+    parser.add_argument("--tts", help="radio_drama TTS backend (default: voxcpm2_longform).")
+    parser.add_argument("--voice-sample", help="Reference audio recording for the narrator.")
     parser.add_argument(
         "--cache-dir",
-        default=".tts_cache",
         help="Directory to store/retrieve cached TTS assets (default: .tts_cache).",
     )
     parser.add_argument(
@@ -478,14 +500,16 @@ def main():
             raise SystemExit(1)
         config = config_data
 
-    if "voice_id" not in config:
-        config["voice_id"] = args.voice_id
     if args.region is not None:
         config["region_name"] = args.region
-    if "cache_dir" not in config:
+    if args.tts is not None:
+        config["tts"] = args.tts
+    config.setdefault("tts", "voxcpm2_longform")
+    if args.voice_sample is not None:
+        config["voice_sample"] = args.voice_sample
+    if args.cache_dir is not None:
         config["cache_dir"] = args.cache_dir
-    if "speech_driver" not in config:
-        config["speech_driver"] = "poly"
+    config.setdefault("cache_dir", ".tts_cache")
 
     try:
         document_text = load_document(document_path)
@@ -497,6 +521,7 @@ def main():
         state = build_document_state(
             document_text=document_text,
             config=config,
+            document_path=document_path,
         )
     except Exception as exc:
         logging.error("Failed to preprocess document: %s", exc)

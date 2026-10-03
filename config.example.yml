@@ -1,0 +1,23 @@
+# Speech generation and TTS word alignment use radio_drama.
+tts: voxcpm2_longform
+voice_sample: ~/voices/narrator.wav
+# Relative paths resolve under cwd; each document gets a named subdirectory.
+cache_dir: .tts_cache
+filter: 'pandoc -f rst -t plain --lua=examples/qwen_filter.lua --wrap=none'
+radio_drama:
+  alignment_backend: qwen
+  alignment_language: en
+  # device: cuda:1
+  # output_sample_rate: 48000
+  # output_channels: 2
+  # batch_size: 10
+
+# Voice input still uses contextual Gemma, or AWS Transcribe with region_name.
+# region_name: us-east-1
+# gemma4:
+#   model: 'openai:google/gemma-4-E4B-it'
+#   base_url: 'http://127.0.0.1:8000/v1'
+
+llm:
+  model: 'ollama:gemma4:31b'
+  reasoning: false
