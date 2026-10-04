@@ -1,5 +1,4 @@
 import operator
-import asyncio
 import os
 import json
 import typing
@@ -13,7 +12,7 @@ from langchain.chat_models import init_chat_model
 import langchain_core.language_models
 from hartmans_ai.langchain_logger import ChatMLJsonlCallbackHandler
 import dataclasses
-from .document import DocumentState, DocumentUpdate, apply_document_update
+from .document import DocumentState
 from . import tools
 
 _DEFAULT_LLM_CONFIG = {"model": "ollama:gemma4:31b",
@@ -96,11 +95,24 @@ class GraphState:
     document_state: DocumentState|None = None
     position: int|None = None
     chunk_id: int|None = None
-    elapsed_ms:int|None = None
-    document_update: DocumentUpdate|None = None
     response_text: str|None = None
     disposition: typing.Literal['play', 'pause', 'stop'] = 'play'
     messages: typing.Annotated[list[BaseMessage], operator.add] = dataclasses.field(default_factory=lambda: [])
+
+def build_graph_state(
+    state: DocumentState, position: int, instructions: str,
+    messages: list[BaseMessage] | None = None,
+) -> GraphState:
+    """Build an isolated editing draft and the next conversation turn."""
+    draft = state.copy()
+    position = max(0, min(position, len(draft.document)))
+    return GraphState(
+        document=draft.document, document_state=draft, position=position,
+        chunk_id=draft.find_chunk_id(position),
+        messages=[*(messages if messages is not None else initial_messages(draft.document)),
+                  instruction_message(draft.document, position, instructions)],
+    )
+
 
 async def initial_node(state: GraphState)-> dict:
     assert state.document_state
@@ -110,7 +122,7 @@ async def _llm_call_with_model(
     llm: langchain_core.language_models.BaseChatModel,
     state: GraphState,
 ) -> dict:
-    assert state.document
+    assert state.document is not None
     tool_llm = llm.bind_tools(TOOLS)
     return {
         'messages': [await tool_llm.ainvoke(state.messages)]
@@ -129,10 +141,6 @@ async def final(state:GraphState)-> dict:
     results:dict[str, typing.Any] = {'response_text': response_text}
     results['document'] = None
     assert state.document_state
-    if state.document and (state.document != state.document_state.document):
-        results['document_state'] = await asyncio.to_thread(
-            apply_document_update, state.document, state.document_state,
-        )
     return results
 
 async def our_tool_node(state:GraphState, runtime:Runtime) -> Command | typing.Sequence[Command]:

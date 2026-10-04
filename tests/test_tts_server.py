@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import backend
-from agentic_editor.tts import build_document_state, map_elapsed_time_to_document
+from agentic_editor.tts import build_document_state
 
 
 @pytest.fixture(scope="session")
@@ -32,12 +32,12 @@ def test_api_endpoints(document_state, sample_document):
     status_data = status_resp.json()
     document_id = status_data["documentId"]
     assert status_data["chunkCount"] == 1
-    assert status_data["document"]["chunks"][0]["chunk_id"] == 0
+    assert "chunk_id" not in status_data["document"]["chunks"][0]
 
     doc_resp = client.get(f"/document/{document_id}")
     assert doc_resp.status_code == 200
     doc = doc_resp.json()
-    assert doc["chunks"][0]["chunk_id"] == 0
+    assert "chunk_id" not in doc["chunks"][0]
 
     assert client.post("/interruptions", json={}).status_code == 404
 
@@ -219,8 +219,9 @@ def test_invalid_chunk_request_does_not_submit_audio(make_marks_app, document, c
 def test_empty_document_has_no_chunk_marks(make_marks_app):
     app, state = make_marks_app("")
     response = TestClient(app).get(f"/chunks/{app.state.document_id}/0/marks")
-    assert response.status_code == 404
-    assert response.json() == {"detail": "Unknown chunk_id"}
+    assert response.status_code == 200
+    assert response.json()["marks"] == []
+    assert backend._build_document_response(state).chunks[0].has_audio is False
     assert state.speech is None
 
 

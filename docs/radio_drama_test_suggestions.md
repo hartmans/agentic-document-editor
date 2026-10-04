@@ -82,3 +82,12 @@ Filter execution and preparation reuse, original/filtered text matching,
 word-marker projection to document offsets, revision-bound HTTP responses,
 chunk grouping at registration, WAV encoding, and playback before marks are
 ready. Gemma's contextual voice interpretation and AWS Transcribe are unchanged.
+
+## Concurrent timing callers used by editor streaming
+
+The editor now calls ensure_timing from background render completion and from
+HTTP marks requests without its own timing-task cache. Cover concurrent calls
+with the same timing identity, cache reuse after completion, and failure/retry.
+Also cover cancellation of the first caller and of a later waiter so remaining
+callers get a defined result and no future exception is left unobserved. These
+are library regression tests, not duplicated inference tests in the editor.

@@ -19,14 +19,13 @@ from uuid import uuid4
 from agentic_editor.document import (
     DocumentState,
     CharacterResumePoint,
-    apply_document_update,
     load_document,
 )
-from agentic_editor.graph import GraphState, build_graph, initial_messages, instruction_message
+from agentic_editor.graph import GraphState, build_graph, build_graph_state, initial_messages
 from agentic_editor.tts import (
     build_document_state,
     submit_document_audio,
-    map_elapsed_time_to_document,
+    prepare_document_round,
 )
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.concurrency import run_in_threadpool
@@ -41,7 +40,6 @@ import yaml
 
 
 class DocumentChunkModel(BaseModel):
-    chunk_id: int
     doc_char_start: int
     doc_char_end: int
     has_audio: bool
@@ -110,10 +108,9 @@ def _build_document_response(document_state: DocumentState) -> DocumentResponseM
         document=document_state.document,
         chunks=[
             DocumentChunkModel(
-                chunk_id=i,
-                doc_char_start=c.doc_char_start,
-                doc_char_end=c.doc_char_end,
-                has_audio=bool(c.dialogue_lines) if document_state.speech else True,
+                doc_char_start=document_state.chunk_start(i),
+                doc_char_end=document_state.chunk_end(i),
+                has_audio=bool(c.dialogue_lines) if document_state.speech else bool(c.text.strip()),
             )
             for i, c in enumerate(document_state.chunks)
         ],
@@ -283,9 +280,12 @@ def create_app(
             raise HTTPException(status_code=404, detail="Unknown chunk_id")
         chunk = document_state.chunks[chunk_id]
         try:
-            if document_state.speech is None:
+            if not chunk.text.strip():
+                marks = []
+            elif document_state.speech is None:
                 raise RuntimeError("Speech is not configured")
-            marks = await document_state.speech.marks(chunk)
+            else:
+                marks = await document_state.speech.marks(chunk)
         except Exception as exc:
             logging.exception("Failed to load marks for chunk %s: %s", chunk_id, exc)
             raise HTTPException(status_code=500, detail="Failed to align speech")
@@ -294,8 +294,8 @@ def create_app(
             chunkId=chunk_id,
             marks=[WordMarkModel(
                 timeMs=mark.time_ms,
-                docCharStart=chunk.doc_char_start + mark.chunk_char_start,
-                docCharEnd=chunk.doc_char_start + mark.chunk_char_end,
+                docCharStart=document_state.chunk_start(chunk_id) + mark.chunk_char_start,
+                docCharEnd=document_state.chunk_start(chunk_id) + mark.chunk_char_end,
             ) for mark in marks],
         )
 
@@ -311,31 +311,9 @@ def create_app(
     async def process_instructions(request: InstructionsRequest):
         document_state = app.state.document_state
         resume_point = request.resumePoint
-        if resume_point.chunkId is not None and resume_point.offsetMs is not None:
-            if resume_point.chunkId >= len(document_state.chunks):
-                raise HTTPException(status_code=422, detail="Unknown resume chunk")
-            if document_state.speech is not None:
-                try:
-                    resolved = await map_elapsed_time_to_document(
-                        document_state.speech, document_state.chunks[resume_point.chunkId],
-                        resume_point.chunkId, resume_point.offsetMs,
-                    )
-                    resume_point = resume_point.model_copy(update={"docCharPosition": resolved["docCharPosition"]})
-                except Exception:
-                    logging.exception("Could not resolve interruption timing; using last known character position")
-        messages = [
-            *app.state.messages,
-            instruction_message(
-                document_state.document,
-                resume_point.docCharPosition,
-                request.instructions,
-            ),
-        ]
-        graph_state = GraphState(
-            document_state=document_state,
-            position=resume_point.docCharPosition,
-            chunk_id=document_state.find_chunk_id(resume_point.docCharPosition),
-            messages=messages,
+        graph_state = build_graph_state(
+            document_state, resume_point.docCharPosition, request.instructions,
+            app.state.messages,
         )
         result = await app.state.graph.ainvoke(graph_state)
         if isinstance(result, GraphState):
@@ -347,6 +325,9 @@ def create_app(
         updated_state = output_state.document_state
         if updated_state is None:
             raise RuntimeError("No document state returned")
+        position = (output_state.position if output_state.position is not None
+                    else resume_point.docCharPosition)
+        updated_state = await prepare_document_round(document_state, updated_state, position)
         updated_document_id = (
             uuid4().hex if updated_state.document != document_state.document
             else app.state.document_id
@@ -359,12 +340,9 @@ def create_app(
         )
         await submit_document_audio(
             updated_state,
-            position_hint=(output_state.position if output_state.position is not None
-                           else resume_point.docCharPosition),
             response_state=response_document_state,
+            eager=False,
         )
-        position = (output_state.position if output_state.position is not None
-                    else resume_point.docCharPosition)
         updated_resume_point = CharacterResumePoint(
             docCharPosition=max(0, min(position, len(updated_state.document))),
             documentId=updated_document_id,

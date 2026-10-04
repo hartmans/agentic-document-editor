@@ -8,7 +8,6 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command
 
 from agentic_editor.document import DocumentState
-from agentic_editor.graph import DocumentUpdate
 from agentic_editor.tools import (
     pause_playback,
     replace_text,
@@ -57,7 +56,7 @@ def test_replace_text_toolnode_executes(position, change_start, expected_positio
     result = tool_node.invoke(
         {
             "messages": [ai_msg],
-            "document_state": doc_state,
+            "document_state": doc_state.copy(),
             "document": document,
             "position": position,
         },
@@ -179,6 +178,7 @@ def test_replace_text_searches_the_current_mutable_document():
         document=original,
         voice_id="Joanna",
     )
+    doc_state.update(" gamma", len(original), len(original))
     ai_msg = AIMessage(
         content="",
         tool_calls=[{

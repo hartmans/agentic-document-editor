@@ -1,7 +1,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import re
 from typing import Any, Annotated
@@ -36,11 +35,6 @@ def _tool_response(document: str, position: int, length: int = DEFAULT_EXCERPT_L
     )
 
 
-def _current_state(state: DocumentState, document: str) -> DocumentState:
-    if state.document == document:
-        return state
-    return dataclasses.replace(state, document=document)
-
 @tool(infer_schema=True, parse_docstring=True)
 def replace_text(
     before: Annotated[str, Field(max_length=120)],
@@ -70,10 +64,11 @@ def replace_text(
 
     """
 
-    result = _current_state(state, document).search_text(before, old_text, after)
+    result = state.search_text(before, old_text, after)
     if result.index is None:
         return result.render_error(target_field_name="old_text")
-    updated = document[:result.index] + new_text + document[result.index + len(old_text) :]
+    state.update(new_text, result.index, result.index + len(old_text))
+    updated = state.document
     # Keep nearby preceding context, but jump to edits farther ahead.
     resume_position = (
         result.index if result.index < position or result.index > position + 100
@@ -81,6 +76,7 @@ def replace_text(
     )
     return Command(update={
         'document': updated,
+        'document_state': state,
         'position': resume_position,
             'messages': [ToolMessage(
                 content=_tool_response(
@@ -114,7 +110,7 @@ def reposition_playback(
         after:  Short excerpt of text appearing after *target* (a few words)
         message: If supplied the final response to the author before playback resumes. If not supplied, playback will resume with no response.
     '''
-    result = _current_state(state, document).search_text(before, target, after)
+    result = state.search_text(before, target, after)
     if result.index is None:
         return result.render_error()
     return Command(update={

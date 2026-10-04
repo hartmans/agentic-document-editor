@@ -94,3 +94,18 @@ def test_final_preserves_terminal_tool_response_text():
     update = asyncio.run(final(state))
 
     assert update["response_text"] == ""
+
+
+def test_build_graph_state_forks_document_and_message_list():
+    from agentic_editor.graph import build_graph_state
+    from agentic_editor.tts import build_document_state
+    published = build_document_state("Hello world")
+    history = initial_messages(published.document)
+    state = build_graph_state(published, 6, "Change world", history)
+    assert len(history) == 1
+    assert len(state.messages) == 2
+    assert state.document_state is not published
+    assert state.document_state.chunks[0] is published.chunks[0]
+    state.document_state.update("there", 6, 11)
+    assert published.document == "Hello world"
+    assert state.document_state.document == "Hello there"

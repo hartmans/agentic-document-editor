@@ -4,10 +4,10 @@ import {
   DocumentResponse,
   fetchStatus,
   postInstructions,
-  ResumePoint,
 } from "../api";
 import { VoiceInput } from "./VoiceInput";
 import { DocumentPlayback, DocumentPlaybackHandle } from "./DocumentPlayback";
+import type { PlaybackPosition } from "../audio/speechMarks";
 import { instructionsSentUrl, play } from "../audio/sounds";
 
 interface DocumentSnapshot {
@@ -28,14 +28,14 @@ export function DocumentEditor() {
   const [starting, setStarting] = useState(false);
   const [instructionsPending, setInstructionsPending] = useState(false);
   const [voiceMode, setVoiceMode] = useState<"idle" | "armed" | "waiting">("idle");
-  const [resumePoint, setResumePoint] = useState<ResumePoint | null>(null);
+  const [resumePoint, setResumePoint] = useState<PlaybackPosition | null>(null);
   const playbackRef = useRef<DocumentPlaybackHandle | null>(null);
   const responsePlaybackRef = useRef<DocumentPlaybackHandle | null>(null);
   const mountedRef = useRef(false);
   const instructionRef = useRef<object | null>(null);
   const intentRef = useRef(0);
   const startingRef = useRef(false);
-  const resumePointRef = useRef<ResumePoint | null>(null);
+  const resumePointRef = useRef<PlaybackPosition | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -80,7 +80,7 @@ export function DocumentEditor() {
     }
   };
 
-  function rememberInterruption(info: ResumePoint | undefined, intent: number) {
+  function rememberInterruption(info: PlaybackPosition | undefined, intent: number) {
     if (!snapshot || !info || info.documentId !== snapshot.documentId) return;
     if (mountedRef.current && intent === intentRef.current) {
       resumePointRef.current = info;
@@ -133,7 +133,10 @@ export function DocumentEditor() {
     setVoiceMode("waiting");
     setError(null);
     try {
-      const point = resumePointRef.current;
+      const captured = resumePointRef.current;
+      const player = playbackRef.current;
+      if (captured && !player) throw new Error("Playback not ready");
+      const point = captured ? await player!.resolvePosition(captured) : null;
       if (!isCurrent()) return;
       void play(instructionsSentUrl);
       const result = await postInstructions({
@@ -142,8 +145,6 @@ export function DocumentEditor() {
         resumePoint: {
           documentId: snapshot.documentId,
           docCharPosition: point?.docCharPosition ?? 0,
-          chunkId: point?.chunkId,
-          offsetMs: point?.offsetMs,
         },
       });
       if (!isCurrent()) return;

@@ -18,7 +18,6 @@ export interface StatusResponse {
 }
 
 export interface DocumentChunk {
-  chunk_id: number;
   doc_char_start: number;
   doc_char_end: number;
   has_audio: boolean;
@@ -35,9 +34,7 @@ export interface DocumentResponse {
 export interface ResumePoint {
   documentId: string;
   docCharPosition: number;
-  // Retain an exact audio position when alignment has not arrived yet.
-  chunkId?: number;
-  offsetMs?: number;
+
 }
 
 export interface WordMark {

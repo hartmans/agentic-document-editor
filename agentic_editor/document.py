@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import List, TYPE_CHECKING, Any
 
@@ -16,13 +16,6 @@ if TYPE_CHECKING:
 else:
     # These objects are runtime resources, not part of document-tool schemas.
     AudioPlan = DialogueLine = Any
-
-@dataclass
-class DocumentUpdate:
-    offset: int
-    length: int
-    new_text: str
-
 
 @dataclass(frozen=True)
 class SearchTextConfig:
@@ -80,35 +73,27 @@ class SearchTextResult:
 
 @dataclass
 class TextChunk:
-    """Single contiguous span of the original document."""
+    """A stable document slot with chunk-local speech resources."""
 
     text: str
-    doc_char_start: int
-    doc_char_end: int
     audio_mime_type: str = "audio/wav"
     filtered_text: str = ""
     dialogue_lines: List[DialogueLine] = field(default_factory=list)
     word_correspondences: List[WordCorrespondence] = field(default_factory=list)
     plan: AudioPlan | None = None
+    changed: bool = True
+    prepared: bool = False
+    audio_task: Any = field(default=None, repr=False, compare=False)
 
 
 class CharacterResumePoint(BaseModel):
     docCharPosition: int = Field(ge=0)
     documentId: str | None = None
-    chunkId: int | None = Field(default=None, ge=0)
-    offsetMs: float | None = Field(default=None, ge=0, allow_inf_nan=False)
-
-
-class ResumePoint(BaseModel):
-    chunkId: int
-    offsetMs: int
-    docCharPosition: int
-    documentId: str | None = None
 
 
 @dataclass
 class DocumentState:
-    """In-memory representation of the preprocessed document."""
+    """A document revision, forked before editing through update()."""
 
     document:str #: Original text of the document
     voice_id: str
@@ -116,15 +101,100 @@ class DocumentState:
     chunks: List[TextChunk] = field(default_factory=list)
     aws_session: object | None = None  # Only for the AWS Transcribe credential endpoint.
 
-    def find_chunk_id(self, position: int) -> int:
+    _chunk_starts: list[int] = field(default_factory=list, init=False, repr=False, compare=False)
+    _owned_chunks: set[int] = field(default_factory=set, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
         if not self.chunks:
-            return 0
-        if position <= self.chunks[0].doc_char_start:
-            return 0
+            spans = chunk_documents(self.document) or [(0, len(self.document))]
+            self.chunks = [TextChunk(self.document[start:end]) for start, end in spans]
+            self._owned_chunks = set(range(len(self.chunks)))
+        self._reindex()
+        if self.chunk_end(len(self.chunks) - 1) != len(self.document):
+            raise ValueError("Chunk lengths must cover the document")
+
+    def _reindex(self) -> None:
+        self._chunk_starts = []
+        position = 0
+        for chunk in self.chunks:
+            self._chunk_starts.append(position)
+            position += len(chunk.text)
+
+    def copy(self) -> DocumentState:
+        """Fork a draft, sharing chunks until either state edits them."""
+        self._owned_chunks.clear()
+        return replace(self, chunks=list(self.chunks))
+
+    def chunk_start(self, chunk_id: int) -> int:
+        return self._chunk_starts[chunk_id]
+
+    def chunk_end(self, chunk_id: int) -> int:
+        return self.chunk_start(chunk_id) + len(self.chunks[chunk_id].text)
+
+    def find_chunk_id(self, position: int) -> int:
+        position = max(0, position)
+        end = 0
         for idx, chunk in enumerate(self.chunks):
-            if chunk.doc_char_start <= position < chunk.doc_char_end:
+            end += len(chunk.text)
+            if position < end:
                 return idx
         return len(self.chunks) - 1
+
+    def update(self, text: str, start: int, end: int) -> None:
+        """Replace [start, end), preserving chunk slots and private edited chunks.
+
+        Boundary insertions belong to the following nonempty chunk, or the
+        last slot at EOF. Cross-chunk replacements belong to the first chunk.
+        """
+        if not 0 <= start <= end <= len(self.document):
+            raise ValueError("Invalid document update range")
+        if self.document[start:end] == text:
+            return
+        first = self.find_chunk_id(start)
+        last = self.find_chunk_id(end - 1) if end > start else first
+        first_start = self.chunk_start(first)
+        last_start = self.chunk_start(last)
+        prefix = self.chunks[first].text[:start - first_start]
+        suffix = self.chunks[last].text[end - last_start:]
+        for idx in range(first, last + 1):
+            replacement = (prefix + text if idx == first else "") + (suffix if idx == last else "")
+            if replacement == self.chunks[idx].text:
+                continue
+            if idx not in self._owned_chunks:
+                self.chunks[idx] = TextChunk(replacement)
+                self._owned_chunks.add(idx)
+            else:
+                chunk = self.chunks[idx]
+                chunk.text = replacement
+                chunk.filtered_text = ""
+                chunk.dialogue_lines = []
+                chunk.word_correspondences = []
+                chunk.plan = chunk.audio_task = None
+                chunk.changed = True
+                chunk.prepared = False
+        self.document = self.document[:start] + text + self.document[end:]
+        self._reindex()
+
+    def split_chunk(self, position: int) -> bool:
+        """Introduce one boundary in this revision, preserving other chunks."""
+        if not 0 <= position <= len(self.document):
+            raise ValueError("Invalid chunk split position")
+        idx = self.find_chunk_id(position)
+        offset = position - self.chunk_start(idx)
+        chunk = self.chunks[idx]
+        if offset == 0 or offset == len(chunk.text):
+            return False
+        self.chunks[idx:idx + 1] = [TextChunk(chunk.text[:offset]), TextChunk(chunk.text[offset:])]
+        self._owned_chunks = {i if i < idx else i + 1 for i in self._owned_chunks if i != idx}
+        self._owned_chunks.update((idx, idx + 1))
+        self._reindex()
+        return True
+
+    def prepare_changed_chunks(self) -> None:
+        if self.speech:
+            for chunk in self.chunks:
+                if chunk.changed:
+                    self.speech.prepare_chunk(chunk)
 
     def search_text(
         self,
@@ -656,19 +726,6 @@ def chunk_documents(document: str) -> List[tuple[int, int]]:
     return spans
 
 
-def apply_document_update(update: str, state: DocumentState) -> DocumentState:
-    """Rebuild document metadata without scheduling audio for the edited text."""
-    updated_document = update
-    from agentic_editor.tts import build_document_state
-
-    updated = build_document_state(
-        document_text=updated_document,
-        speech=state.speech,
-    )
-    updated.aws_session = state.aws_session
-    return updated
-
-
 def load_document(path: Path) -> str:
     """Read a UTF-8 text document from disk."""
     if not path.exists() or not path.is_file():
@@ -679,12 +736,11 @@ def load_document(path: Path) -> str:
 __all__ = [
     "SpeechMark",
     "TextChunk",
-    "ResumePoint",
+    "CharacterResumePoint",
     "DocumentState",
     "SearchTextConfig",
     "SearchTextCandidate",
     "SearchTextResult",
     "chunk_documents",
-    'apply_document_update',
     "load_document",
 ]

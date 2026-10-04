@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import aclosing
 from dataclasses import fields
 import hashlib
 import io
@@ -17,6 +19,7 @@ from .speech_marks import SpeechMark
 from .text_alignment import match_filtered_words, project_word_marks
 
 if TYPE_CHECKING:
+    from radio_drama import RenderResult
     from .document import TextChunk
 
 
@@ -57,10 +60,7 @@ class SpeechService:
         if unknown:
             raise ValueError(f"Unknown radio_drama settings: {sorted(unknown)}")
         self.production_config = ProductionConfig(**settings)
-        self._prepared: dict[str, tuple] = {}
-        self._plans: dict[str, Any] = {}
-        self._audio: dict[str, asyncio.Task] = {}
-        self._marks: dict[str, asyncio.Task] = {}
+        self._tasks: set[asyncio.Task] = set()
         self._planning_lock = asyncio.Lock()
         self._injector = None
         self._ainjector = None
@@ -68,24 +68,21 @@ class SpeechService:
     def prepare_chunk(self, chunk: TextChunk) -> None:
         from radio_drama import DialogueLine
 
-        prepared = self._prepared.get(chunk.text)
-        if prepared is None:
-            text = chunk.text
-            command = self.config.get("filter")
-            if command:
-                text = subprocess.run(
-                    shlex.split(str(command)), input=text, text=True,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
-                ).stdout
-            matches = match_filtered_words(chunk.text, text)
-            offsets = tuple(sorted({m.spoken_start for m in matches} | {m.spoken_end for m in matches}))
-            # Empty filtered chunks still have a plan, but no synthesis request.
-            lines = [DialogueLine(self.speaker, text, mark_offsets=offsets)] if text.strip() else []
-            prepared = (text, lines, matches)
-            self._prepared[chunk.text] = prepared
-        chunk.filtered_text, lines, matches = prepared
-        chunk.dialogue_lines = list(lines)
+        if chunk.prepared:
+            return
+        text = chunk.text
+        command = self.config.get("filter")
+        if command and text.strip():
+            text = subprocess.run(
+                shlex.split(str(command)), input=text, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+            ).stdout
+        matches = match_filtered_words(chunk.text, text)
+        offsets = tuple(sorted({m.spoken_start for m in matches} | {m.spoken_end for m in matches}))
+        chunk.filtered_text = text
+        chunk.dialogue_lines = [DialogueLine(self.speaker, text, mark_offsets=offsets)] if text.strip() else []
         chunk.word_correspondences = list(matches)
+        chunk.prepared = True
 
     async def initialize(self) -> None:
         if self._injector is not None:
@@ -117,34 +114,83 @@ class SpeechService:
             for chunk in chunks:
                 if chunk.plan is not None:
                     continue
-                plan = self._plans.get(chunk.text)
-                if plan is None:
-                    node = ScriptNode(
-                        location=SourceLocation(str(self.document_path), None, None),
-                        attributes={"tts": self.tts},
-                    )
-                    plan = await self._ainjector(
-                        ScriptPlan, node=node, script_events=chunk.dialogue_lines,
-                        tts=self.tts, attrs={},
-                    )
-                    self._plans[chunk.text] = plan
-                chunk.plan = plan
+                self.prepare_chunk(chunk)
+                node = ScriptNode(
+                    location=SourceLocation(str(self.document_path), None, None),
+                    attributes={"tts": self.tts},
+                )
+                chunk.plan = await self._ainjector(
+                    ScriptPlan, node=node, script_events=chunk.dialogue_lines,
+                    tts=self.tts, attrs={},
+                )
+                chunk.changed = False
 
-    @staticmethod
-    def _task(entries: dict, key: str, operation) -> asyncio.Task:
-        task = entries.get(key)
+    def _task(self, chunk: TextChunk, attribute: str, operation) -> asyncio.Task:
+        task = getattr(chunk, attribute)
         if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):
             task = asyncio.create_task(operation())
-            entries[key] = task
-            task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+            setattr(chunk, attribute, task)
+            self._tasks.add(task)
+            def completed(done):
+                self._tasks.discard(done)
+                if not done.cancelled():
+                    done.exception()
+            task.add_done_callback(completed)
         return task
+
+    @staticmethod
+    def audio_available(chunk: TextChunk) -> bool:
+        if chunk.plan is None:
+            return False
+        request = chunk.plan.registered_request
+        return request is None or request.audio_available()
+
+    def _background(self, operation) -> asyncio.Task:
+        task = asyncio.create_task(operation)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(self._report_failure)
+        return task
+
+    async def stream_audio(self, chunk: TextChunk) -> AsyncIterator[RenderResult]:
+        """Yield production-format PCM; radio-drama owns stream replay/lifetime.
+
+        A consumer leaving early does not cancel radio-drama's producer. Timing
+        generation joins that producer after its first nonempty audio arrives.
+        """
+        await self.plan_chunks([chunk])
+        request = chunk.plan.registered_request
+        started = False
+        if request is None or request.audio_available():
+            # A plan's memoized batch render may still be pending even though
+            # streaming has already published a complete registration result.
+            result = await request.render() if request is not None else await chunk.plan.render()
+            self._background(self._ensure_timing(chunk, result))
+            yield result
+            return
+        async with aclosing(request.render_stream()) as stream:
+            async for result in stream:
+                if result.frame_count and not started:
+                    started = True
+                    self._background(self._render_and_time(chunk))
+                yield result
+
+    async def _playback_result(self, chunk: TextChunk):
+        # Starting a marks request must not start a batch ahead of playback's
+        # stream for newly edited text. Both consumers join radio-drama's stream.
+        async with aclosing(self.stream_audio(chunk)) as stream:
+            async for _ in stream:
+                pass
+        request = chunk.plan.registered_request
+        return await request.render() if request is not None else await chunk.plan.render()
 
     async def audio(self, chunk: TextChunk) -> bytes:
         await self.plan_chunks([chunk])
-        return await asyncio.shield(self._task(self._audio, chunk.text, lambda: self._encode_audio(chunk)))
+        return await asyncio.shield(self._task(chunk, "audio_task", lambda: self._encode_audio(chunk)))
 
     async def _encode_audio(self, chunk: TextChunk) -> bytes:
-        result = await chunk.plan.render()
+        # Phase 1 compatibility: WAV consumers still wait for a complete result.
+        result = await self._playback_result(chunk)
         return await asyncio.to_thread(self._wav_bytes, result.audio)
 
     def _wav_bytes(self, audio) -> bytes:
@@ -157,12 +203,12 @@ class SpeechService:
 
     async def marks(self, chunk: TextChunk) -> list[SpeechMark]:
         await self.plan_chunks([chunk])
-        return await asyncio.shield(self._task(self._marks, chunk.text, lambda: self._align_marks(chunk)))
+        return await self._align_marks(chunk)
 
     async def _align_marks(self, chunk: TextChunk) -> list[SpeechMark]:
         if not chunk.dialogue_lines:
             return []
-        result = await chunk.plan.render()
+        result = await self._playback_result(chunk)
         timing = await chunk.plan.ensure_timing(chunk.dialogue_lines, result)
         marks = []
         # The concrete plan calls stay here; playback consumes chunk-local
@@ -173,12 +219,19 @@ class SpeechService:
             marks.extend(project_word_marks(chunk.word_correspondences, starts))
         return sorted(marks, key=lambda mark: mark.time_ms)
 
+    async def _ensure_timing(self, chunk: TextChunk, result) -> None:
+        if chunk.dialogue_lines:
+            await chunk.plan.ensure_timing(chunk.dialogue_lines, result)
+
+    async def _render_and_time(self, chunk: TextChunk) -> None:
+        result = await chunk.plan.render()
+        await self._ensure_timing(chunk, result)
+
     def prefetch(self, chunks: list[TextChunk]) -> None:
-        # Every plan must be registered before kicking off rendering. No editor
-        # worker limits or priority queues interfere with radio_drama batching.
+        # Register all plans first. The library owns batching and timing sharing;
+        # our task set exists only to observe failures and clean up at shutdown.
         for chunk in chunks:
-            task = self._task(self._audio, chunk.text, lambda chunk=chunk: self._encode_audio(chunk))
-            task.add_done_callback(self._report_failure)
+            self._background(self._render_and_time(chunk))
 
     @staticmethod
     def _report_failure(task: asyncio.Task) -> None:
@@ -186,13 +239,11 @@ class SpeechService:
             logging.error("Background speech rendering failed: %s", task.exception())
 
     async def close(self) -> None:
-        tasks = [*self._audio.values(), *self._marks.values()]
+        tasks = list(self._tasks)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         if self._injector is not None:
             self._injector.close()
         self._injector = self._ainjector = None
-        self._plans.clear()
-        self._audio.clear()
-        self._marks.clear()
+        self._tasks.clear()

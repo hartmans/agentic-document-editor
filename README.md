@@ -24,17 +24,37 @@ absolute path. Edits retain that directory; moving the document selects another.
 Assistant responses share the source document's directory. Delete the document
 cache when changing voices. No caches are placed beside the source document.
 
-Document construction filters each chunk and creates a list of dialogue lines
-(one today), with best-effort correspondences to original text. A later phase
-registers one ScriptPlan per chunk before starting renders, so radio_drama owns
-batching. Each chunk stores an AudioPlan, leaving room for future script slices.
+Document construction establishes local chunk boundaries and filters each chunk
+into a list of dialogue lines (currently one line, or none for empty text).
+`build_graph_state()` forks a shallow document draft for each instruction round;
+`DocumentState.update(text, start, end)` copies affected chunks on their first
+edit. Absolute positions belong to the revision, so shifted chunks can share
+speech resources with older revisions. Empty slots remain in document responses;
+their array index is their chunk ID and playback skips slots without audio.
+
+At round completion, identical document text keeps the published state and ID.
+After text changes, an interior resume point splits only its containing chunk,
+and only if that chunk has no completed audio. Registration first checks cache
+availability without starting rendering; new split chunks are then prepared and
+planned. Other boundaries and resources survive. Reposition-only rounds do not
+split chunks. Each chunk owns its filtered text, dialogue lines, AudioPlan, and
+WAV task. radio_drama owns concurrent timing memoization. Published revisions
+stay available for playback.
+
+Startup eagerly renders all chunks and requests timing as each finishes.
+Post-edit registration does not eagerly render new chunks. The backend PCM
+playback iterator streams unavailable audio, starts rendering the next nonempty
+chunk after its first audio arrives, and pregenerates timing independently.
 
 Audio and word marks are independently available. Playback starts at a chunk
 boundary or a known audio offset without awaiting marks; a character seek inside
-a chunk waits for timing. Late marks enable highlighting at the current playback
-time. Interruptions retain the audio offset, which the backend resolves before
-editing. Missing marks retain the existing preceding-word approximation.
-Streaming TTS is not implemented in this migration.
+a chunk waits for timing. Instruction submission waits for marks to resolve an
+interruption to a character position; audio offsets remain local to playback.
+Late marks enable highlighting at the current playback time. Missing marks
+retain the existing preceding-word approximation.
+Phase 1 exposes this behavior through `stream_document_audio()`; the current
+WAV route still waits for a complete result. Incremental Opus delivery and
+frontend playback are phase 2; see [the saved plan](docs/streaming_phase_2.md).
 
 Voice input is unchanged: Gemma interprets audio using document context, and
 setting `region_name` selects AWS Transcribe. radio_drama alignment is used only

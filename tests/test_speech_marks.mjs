@@ -7,7 +7,7 @@ const source = readFileSync(new URL('../src/audio/speechMarks.ts', import.meta.u
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 },
 });
-const { chunkForPosition, markAtTime, timeAtPosition } = await import(
+const { chunkForPosition, markAtTime, timeAtPosition, resolvePlaybackPosition } = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
 );
 
@@ -32,11 +32,34 @@ test('time and character mapping uses preceding word, including boundaries', () 
 
 test('character resume targets select the containing chunk', () => {
   const chunks = [
-    { chunk_id: 0, doc_char_start: 0, doc_char_end: 50 },
-    { chunk_id: 1, doc_char_start: 50, doc_char_end: 100 },
+    { doc_char_start: 0, doc_char_end: 50 },
+    { doc_char_start: 50, doc_char_end: 100 },
   ];
   assert.equal(chunkForPosition(chunks, 49), 0);
   assert.equal(chunkForPosition(chunks, 50), 1);
   assert.equal(chunkForPosition(chunks, 100), 1);
   assert.equal(chunkForPosition([], 0), 0);
+});
+
+
+test('instruction positions wait for marks and discard local audio coordinates', async () => {
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const point = { documentId: 'revision', docCharPosition: 50, chunkId: 1, offsetMs: 900 };
+  let ready = false;
+  const result = resolvePlaybackPosition(point, [{doc_char_start: 0}, {doc_char_start: 50}],
+    () => pending).then((value) => { ready = true; return value; });
+  await Promise.resolve();
+  assert.equal(ready, false);
+  release([{timeMs: 700, docCharStart: 57, docCharEnd: 62}]);
+  assert.deepEqual(await result, {documentId: 'revision', docCharPosition: 57});
+  await assert.rejects(resolvePlaybackPosition(point, [{doc_char_start: 0}, {doc_char_start: 50}],
+    async () => { throw new Error('alignment failed'); }), /alignment failed/);
+});
+
+test('empty slots keep their indices when selecting chunks', () => {
+  const chunks = [{doc_char_end: 0}, {doc_char_end: 5}, {doc_char_end: 5}, {doc_char_end: 9}];
+  assert.equal(chunkForPosition(chunks, 0), 1);
+  assert.equal(chunkForPosition(chunks, 5), 3);
+  assert.equal(chunkForPosition(chunks, 9), 3);
 });

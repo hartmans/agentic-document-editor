@@ -12,19 +12,19 @@ import {
 import { AudioEngine } from "../audio/AudioEngine";
 import { AudioCtx } from "../context/AudioContextProvider";
 import { ResumePoint, WordMark, fetchChunkAudio, fetchChunkMarks } from "../api";
-import { chunkForPosition, markAtTime, timeAtPosition } from "../audio/speechMarks";
+import { chunkForPosition, markAtTime, timeAtPosition, resolvePlaybackPosition, PlaybackPosition } from "../audio/speechMarks";
 import { marksForStart } from "../audio/playbackReadiness";
 
 export interface ChunkRef {
-  chunk_id: number;
   doc_char_start: number;
   doc_char_end: number;
   has_audio?: boolean;
 }
 
 export interface DocumentPlaybackHandle {
-  play: (resume?: ResumePoint) => Promise<void>;
-  stop: () => ResumePoint;
+  play: (resume?: PlaybackPosition) => Promise<void>;
+  stop: () => PlaybackPosition;
+  resolvePosition: (point: PlaybackPosition) => Promise<ResumePoint>;
 }
 
 let globalComponentNumber = 0;
@@ -53,10 +53,10 @@ export function DocumentPlayback({
     const audioEngineRef = useRef<AudioEngine | null>(null);
     const buffersRef = useRef<Map<string, AudioBuffer>>(new Map());
     const generationRef = useRef(0);
-    const pendingStartRef = useRef<ResumePoint | null>(null);
+    const pendingStartRef = useRef<PlaybackPosition | null>(null);
     const marksRef = useRef<Map<string, WordMark[]>>(new Map());
     const pendingMarksRef = useRef<Map<string, Promise<WordMark[]>>>(new Map());
-    const lastPositionRef = useRef<ResumePoint>({ documentId, docCharPosition: 0 });
+    const lastPositionRef = useRef<PlaybackPosition>({ documentId, docCharPosition: 0 });
     const [highlight, setHighlight] = useState<WordMark | null>(null);
     const [error, setError] = useState<string | null>(null);
     const playingRef = useRef(false);
@@ -202,7 +202,7 @@ export function DocumentPlayback({
       }
     }
 
-    function stopPlayback(): ResumePoint {
+    function stopPlayback(): PlaybackPosition {
       const info = audioEngineRef.current?.getCurrentPlaybackInfo();
       const pending = pendingStartRef.current;
       generationRef.current += 1;
@@ -226,7 +226,7 @@ export function DocumentPlayback({
     }
 
     useImperativeHandle(ref, () => ({
-      play: async (resume?: ResumePoint | null) => {
+      play: async (resume?: PlaybackPosition | null) => {
         if (playingRef.current) return;
         if (resume?.documentId && resume.documentId !== documentId) {
           throw new Error("Resume point belongs to another document revision");
@@ -241,6 +241,12 @@ export function DocumentPlayback({
         await startChunk(targetChunk, docPos, generation, offsetMs);
       },
       stop: () => stopPlayback(),
+      resolvePosition: async (point: PlaybackPosition): Promise<ResumePoint> => {
+        if (point.documentId !== documentId) {
+          throw new Error("Resume point belongs to another document revision");
+        }
+        return resolvePlaybackPosition(point, chunks, loadMarks);
+      },
     }));
 
     useEffect(() => {
