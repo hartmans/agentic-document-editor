@@ -17,6 +17,8 @@ interface DocumentSnapshot {
 
 interface ResponsePlayback extends DocumentSnapshot {
   intent: number;
+  // Resuming an interrupted reply updates its intent without remounting its player.
+  playbackKey: number;
   disposition: "play" | "pause" | "stop";
 }
 
@@ -35,6 +37,12 @@ export function DocumentEditor() {
   const instructionRef = useRef<object | null>(null);
   const intentRef = useRef(0);
   const startingRef = useRef(false);
+  const responseActiveRef = useRef(false);
+  const interruptedRef = useRef<{
+    intent: number;
+    source: "document" | "response";
+    position?: PlaybackPosition;
+  } | null>(null);
   const resumePointRef = useRef<PlaybackPosition | null>(null);
 
   useEffect(() => {
@@ -54,6 +62,7 @@ export function DocumentEditor() {
   }, []);
 
   const clearResponse = () => {
+    responseActiveRef.current = false;
     responsePlaybackRef.current?.stop();
     setResponse(null);
   };
@@ -89,6 +98,7 @@ export function DocumentEditor() {
   }
 
   const handleStop = () => {
+    interruptedRef.current = null;
     const intent = ++intentRef.current;
     const info = playbackRef.current?.stop();
     if (playing || startingRef.current) rememberInterruption(info, intent);
@@ -99,6 +109,7 @@ export function DocumentEditor() {
   };
 
   const handlePause = () => {
+    interruptedRef.current = null;
     const intent = ++intentRef.current;
     const info = playbackRef.current?.stop();
     if (playing || startingRef.current) rememberInterruption(info, intent);
@@ -109,22 +120,38 @@ export function DocumentEditor() {
   };
 
   const handleInterrupt = () => {
-    if (instructionRef.current) return;
+    if (instructionRef.current || interruptedRef.current) return;
     const intent = ++intentRef.current;
+    const documentActive = playing || startingRef.current;
     const info = playbackRef.current?.stop();
-    if (playing || startingRef.current) rememberInterruption(info, intent);
+    if (documentActive) rememberInterruption(info, intent);
+    const responseActive = responseActiveRef.current;
+    const responsePosition = responsePlaybackRef.current?.stop();
+    interruptedRef.current = responseActive
+      ? { intent, source: "response", position: responsePosition }
+      : documentActive ? { intent, source: "document", position: info } : null;
     startingRef.current = false;
     setStarting(false);
-    clearResponse();
   };
 
   const handleInstructions = async (instructions: string) => {
     if (instructionRef.current || !snapshot) return;
     const trimmed = instructions.trim();
+    const interrupted = interruptedRef.current;
+    interruptedRef.current = null;
     if (!trimmed) {
-      void handlePlay();
+      if (interrupted?.intent !== intentRef.current) return;
+      if (interrupted.source === "document") {
+        void handlePlay();
+      } else {
+        setResponse((current) => current && { ...current, intent: interrupted.intent });
+        void responsePlaybackRef.current?.play(interrupted.position).catch((err: Error) => {
+          if (mountedRef.current && interrupted.intent === intentRef.current) setError(err.message);
+        });
+      }
       return;
     }
+    clearResponse();
     const operation = {};
     instructionRef.current = operation;
     const intent = intentRef.current;
@@ -153,10 +180,12 @@ export function DocumentEditor() {
       setResumePoint(result.resumePoint);
       resumePointRef.current = result.resumePoint;
       if (intent === intentRef.current) {
+        responseActiveRef.current = true;
         setResponse({
           documentId: result.responseDocumentId,
           document: result.responseDocument,
           intent,
+          playbackKey: intent,
           disposition: result.disposition,
         });
       }
@@ -190,6 +219,7 @@ export function DocumentEditor() {
 
   const handleResponseEnd = () => {
     if (!response || response.intent !== intentRef.current) return;
+    responseActiveRef.current = false;
     if (response.disposition === "play") {
       void handlePlay();
     } else if (response.disposition === "pause") {
@@ -235,7 +265,7 @@ export function DocumentEditor() {
           autoPlay
           onPlayingChange={handleResponsePlayingChange}
           onNaturalEnd={handleResponseEnd}
-          key={`response/${response.documentId}/${response.intent}`}
+          key={`response/${response.documentId}/${response.playbackKey}`}
         />
       )}
       <DocumentPlayback

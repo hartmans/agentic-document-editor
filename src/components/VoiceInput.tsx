@@ -1,4 +1,5 @@
 import { useContext, useEffect, useRef, useState, useEffectEvent } from "react";
+import { VadLifecycle } from "../audio/VadLifecycle";
 import { MicVAD } from "@ricky0123/vad-web";
 import { AudioCtx } from "../context/AudioContextProvider";
 import { Instructions } from "./Instructions";
@@ -25,7 +26,7 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
   const [instructions, setInstructions] = useState("");
   const [sttCompleted, setSttCompleted] = useState(false);
 
-  const vadRef = useRef<MicVAD | null>(null);
+  const vadRef = useRef<VadLifecycle | null>(null);
   const sttRef = useRef<SpeechToText | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
@@ -33,6 +34,12 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
   const triggeredRef = useRef(false);
   const prerollBufferRef = useRef<Float32Array>(new Float32Array(31200));
   const prerollWriteIdxRef = useRef(0);
+
+  const reportVadError = useEffectEvent((err: unknown) => {
+    console.error("VAD transition failed", err);
+    setVadError((err as Error).message || "VAD transition failed");
+    setVadState("error");
+  });
 
   const appendInstruction = (text: string) => {
     setInstructions((prev) => (prev ? `${prev}\n${text}` : text));
@@ -76,7 +83,7 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
       triggeredRef.current = false;
       setVadState("idle");
       setSttCompleted(false);
-      void vadRef.current?.pause();
+      void vadRef.current?.setEnabled(false).catch(reportVadError);
       return;
     }
 
@@ -86,7 +93,7 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
     prerollWriteIdxRef.current = 0;
     if (vadRef.current) {
       setVadState("listening");
-      void vadRef.current.start();
+      void vadRef.current.setEnabled(true).catch(reportVadError);
     } else if (audioContext && micStream) {
       setVadState("loading");
     }
@@ -123,10 +130,11 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
         await vad.destroy();
         return;
       }
-      vadRef.current = vad;
+      const lifecycle = new VadLifecycle(vad);
+      vadRef.current = lifecycle;
       if (enabledRef.current) {
         setVadState("listening");
-        await vad.start();
+        await lifecycle.setEnabled(true);
       }
     }).catch((err: unknown) => {
       if (cancelled) return;
@@ -139,7 +147,7 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
       cancelled = true;
       const vad = vadRef.current;
       vadRef.current = null;
-      if (vad) void vad.destroy();
+      if (vad) void vad.destroy().catch((err: unknown) => console.error("Failed to destroy VAD", err));
     };
   }, [audioContext, micStream]);
 

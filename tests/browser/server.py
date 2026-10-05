@@ -12,7 +12,7 @@ from radio_drama import RenderResult
 from agentic_editor.opus import encode_opus
 
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5179"], allow_methods=["GET"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5179"], allow_methods=["GET", "POST"], allow_headers=["*"])
 
 
 def tone(seconds):
@@ -61,6 +61,26 @@ async def marks(document_id: str, chunk_id: int):
 @app.get('/health')
 def health():
     return {'ok': True}
+
+
+DOCUMENT = {'document': 'Hello world', 'voice_id': 'fixture',
+            'chunking_strategy': 'paragraph',
+            'chunks': [{'doc_char_start': 0, 'doc_char_end': 11, 'has_audio': True}]}
+
+
+@app.get('/status')
+def status():
+    return {'documentId': 'complete', 'document': DOCUMENT,
+            'documentLength': 11, 'chunkCount': 1, 'voiceId': 'fixture',
+            'chunkingStrategy': 'paragraph'}
+
+
+@app.post('/instructions')
+def instructions(request: dict):
+    return {'documentId': 'complete', 'document': DOCUMENT,
+            'responseDocumentId': 'reply', 'responseDocument': DOCUMENT,
+            'resumePoint': request['resumePoint'],
+            'disposition': 'pause' if request['instructions'] == 'pause' else 'play'}
 
 
 if __name__ == '__main__':
