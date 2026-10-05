@@ -111,7 +111,7 @@ def test_audio_endpoint_does_not_wait_for_marks_and_marks_use_revision_offsets(t
                     await asyncio.wait_for(entered.wait(), 60)
                     audio = await asyncio.wait_for(client.get(f"/chunks/{document_id}/0/audio"), 240)
                     assert audio.status_code == 200, audio.text
-                    assert audio.headers["content-type"] == "audio/wav"
+                    assert audio.headers["content-type"] == "audio/ogg; codecs=opus"
                     info = sf.info(io.BytesIO(audio.content))
                     assert info.frames > 0
                     assert info.samplerate == speech.production_config.resolved_output_sample_rate
@@ -243,8 +243,11 @@ def test_startup_prefetches_entire_document_and_empty_playback_needs_no_engine(t
                 results = [result async for result in stream]
             assert sum(result.frame_count for result in results) == 0
             assert await speech.marks(state.chunks[1]) == []
-            wav = await speech.audio(state.chunks[1])
-            assert sf.info(io.BytesIO(wav)).frames == 0
+            from agentic_editor.opus import encode_opus
+            encoded = b"".join([page async for page in encode_opus(
+                stream_document_audio(state, 1), sample_rate=48000, channels=1,
+            )])
+            assert sf.info(io.BytesIO(encoded)).frames == 0
         finally:
             await speech.close()
     asyncio.run(exercise())

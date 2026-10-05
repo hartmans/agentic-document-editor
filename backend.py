@@ -21,16 +21,18 @@ from agentic_editor.document import (
     CharacterResumePoint,
     load_document,
 )
+from agentic_editor.opus import encode_opus, opus_library
 from agentic_editor.graph import GraphState, build_graph, build_graph_state, initial_messages
 from agentic_editor.tts import (
     build_document_state,
     submit_document_audio,
     prepare_document_round,
+    stream_document_audio,
 )
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import uvicorn
 import yaml
@@ -265,11 +267,18 @@ def create_app(
         try:
             if document_state.speech is None:
                 raise RuntimeError("Speech is not configured")
-            audio_bytes = await document_state.speech.audio(chunk)
+            opus_library()  # Report missing encoder dependencies before HTTP 200.
         except Exception as exc:
-            logging.exception("Failed to load audio for chunk %s: %s", chunk_id, exc)
-            raise HTTPException(status_code=500, detail="Failed to synthesize audio")
-        return Response(content=audio_bytes, media_type=chunk.audio_mime_type)
+            logging.exception("Failed to initialize audio for chunk %s: %s", chunk_id, exc)
+            raise HTTPException(status_code=500, detail="Failed to initialize audio")
+        config = document_state.speech.production_config
+        return StreamingResponse(
+            encode_opus(stream_document_audio(document_state, chunk_id),
+                        sample_rate=config.resolved_output_sample_rate,
+                        channels=config.resolved_output_channels),
+            media_type="audio/ogg; codecs=opus",
+            headers={"Cache-Control": "no-store", "Accept-Ranges": "none", "X-Accel-Buffering": "no"},
+        )
 
     @app.get("/chunks/{document_id}/{chunk_id}/marks", response_model=ChunkMarksResponse)
     async def get_chunk_marks(document_id: str, chunk_id: int):

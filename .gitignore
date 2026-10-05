@@ -17,3 +17,6 @@ node_modules
 logs
 config.yml
 .venv
+
+/test-results/
+/playwright-report/

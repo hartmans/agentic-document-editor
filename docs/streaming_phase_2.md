@@ -7,9 +7,8 @@ behavior only. Do not change frontend playback as part of phase 1.
 
 - Use Opus in Ogg for both completed and incrementally generated chunk audio.
   Feed production-format PCM from radio-drama to one encoder per chunk stream.
-  PyAV and FFmpeg/libopus are available locally. Use short container flushing
-  intervals; encoder throughput has been verified, browser startup latency has
-  not. Preserve the PCM timeline through codec pre-skip and end trimming.
+  Use libopusenc directly through ctypes, with bounded PCM blocks and short
+  container flushing intervals. Preserve the PCM timeline through codec pre-skip and end trimming.
 - Expose the phase 1 PCM iterator through an incremental HTTP audio response.
   Keep the revision/chunk URL model; no temporary playback IDs or suffix plans.
 - Replace complete-WAV fetch/decodeAudioData/AudioBufferSource playback with an
@@ -64,13 +63,32 @@ output guarantee; that limitation is accepted, as with the previous player.
   rendering/timing; instructions use `eager=False`.
 - `stream_document_audio(state, chunk_id)` yields radio-drama RenderResults with
   production-rate/channel PCM and triggers the next nonempty chunk after first
-  audio. Connect this iterator to the Opus encoder in phase 2. Timing starts in
+  audio. The Opus HTTP route consumes this iterator. Timing starts in
   the background and is not a prerequisite for yielding audio.
 - `SpeechService.stream_audio(chunk)` supplies the single-chunk primitive.
   Cold marks requests also join this streaming path so they cannot start a batch
   ahead of the new chunk's playback. They then call ensure_timing directly.
-- The existing WAV route remains compatible and waits for a complete result;
-  it does not yet use the document iterator's successor trigger.
+- The audio route now streams Ogg Opus and uses the document iterator's successor trigger.
 - GPU-dependent streaming/rendering checks were deferred at the user's request
   because GPU memory was scarce. Run the complete backend suite when available,
   including `test_streaming_playback_starts_next_chunk_and_background_timing`.
+
+## Phase 2 implementation and verification
+
+The audio route uses direct libopusenc encoding and StreamingResponse. The
+frontend uses HTMLAudioElement media time, waits for buffered mid-chunk seeks,
+and starts boundary playback independently of timing. Native `ended` advances
+playback; native `error` reports a failure. No buffering timeout or separate
+transport completion protocol is added.
+
+Browser tests use direct backend URLs. Chromium completed playback naturally
+when HTTP ended without an Ogg EOS page. Abrupt HTTP disconnects instead caused
+native retries and buffering during observation. The wrapper follows native
+media events in both cases. Chromium also buffers some initial Opus data before
+starting; incremental HTTP delivery does not guarantee immediate playback of
+the first PCM block.
+
+Verification: 84 Python tests passed, 7 browser tests passed, 7 JavaScript helper
+tests passed, and yarnpkg build passed. Two GPU synthesis/alignment tests remain
+deferred because GPU memory is scarce. Browser fixtures use synthetic PCM with
+the production encoder, so they do not exercise radio-drama synthesis itself.

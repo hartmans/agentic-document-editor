@@ -76,14 +76,12 @@ class TextChunk:
     """A stable document slot with chunk-local speech resources."""
 
     text: str
-    audio_mime_type: str = "audio/wav"
     filtered_text: str = ""
     dialogue_lines: List[DialogueLine] = field(default_factory=list)
     word_correspondences: List[WordCorrespondence] = field(default_factory=list)
     plan: AudioPlan | None = None
     changed: bool = True
     prepared: bool = False
-    audio_task: Any = field(default=None, repr=False, compare=False)
 
 
 class CharacterResumePoint(BaseModel):
@@ -169,7 +167,7 @@ class DocumentState:
                 chunk.filtered_text = ""
                 chunk.dialogue_lines = []
                 chunk.word_correspondences = []
-                chunk.plan = chunk.audio_task = None
+                chunk.plan = None
                 chunk.changed = True
                 chunk.prepared = False
         self.document = self.document[:start] + text + self.document[end:]

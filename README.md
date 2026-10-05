@@ -37,8 +37,7 @@ After text changes, an interior resume point splits only its containing chunk,
 and only if that chunk has no completed audio. Registration first checks cache
 availability without starting rendering; new split chunks are then prepared and
 planned. Other boundaries and resources survive. Reposition-only rounds do not
-split chunks. Each chunk owns its filtered text, dialogue lines, AudioPlan, and
-WAV task. radio_drama owns concurrent timing memoization. Published revisions
+split chunks. Each chunk owns its filtered text, dialogue lines, and AudioPlan. radio_drama owns concurrent timing memoization. Published revisions
 stay available for playback.
 
 Startup eagerly renders all chunks and requests timing as each finishes.
@@ -52,9 +51,10 @@ a chunk waits for timing. Instruction submission waits for marks to resolve an
 interruption to a character position; audio offsets remain local to playback.
 Late marks enable highlighting at the current playback time. Missing marks
 retain the existing preceding-word approximation.
-Phase 1 exposes this behavior through `stream_document_audio()`; the current
-WAV route still waits for a complete result. Incremental Opus delivery and
-frontend playback are phase 2; see [the saved plan](docs/streaming_phase_2.md).
+The audio route streams Ogg Opus encoded directly through libopusenc. Install
+`libopusenc0` (Debian/Ubuntu) on the backend host. Completed and newly generated
+audio use the same progressive response. Playback uses an HTML audio element;
+interruption captures its paused `currentTime` before releasing the source.
 
 Voice input is unchanged: Gemma interprets audio using document context, and
 setting `region_name` selects AWS Transcribe. radio_drama alignment is used only
@@ -68,8 +68,8 @@ PYTHONPATH=../ai-tools:../radio-drama-app ~/venv/bin/python -m pytest tests
 
 The integration test needs a configured VoxCPM2 engine, model
 access, and a reference recording (`RADIO_DRAMA_TEST_VOICE`, default `chandra.wav`
-here). Frontend checks are `yarnpkg build`, `node tests/test_speech_marks.mjs`, and
-`node tests/test_playback_readiness.mjs`. Suggested library-owned tests are in
+here). Frontend checks are `yarnpkg build`, `node src/tests/test_speech_marks.mjs`, and
+`node src/tests/test_playback_readiness.mjs`. Suggested library-owned tests are in
 [the radio_drama handoff](docs/radio_drama_test_suggestions.md).
 
 Document revision API:
@@ -83,3 +83,19 @@ Document revision API:
 - Old revisions remain available for audio until server restart.
 - Stop cancels pending playback and automatic continuation, but an instruction
   already submitted can still finish editing the document.
+
+Browser playback checks use JavaScript tests in `src/tests` and a Python HTTP
+fixture in `tests/browser`. Install Chromium with `yarnpkg exec playwright install
+chromium --only-shell`, then run:
+
+```sh
+TEST_PYTHON=~/venv/bin/python PYTHONPATH=../ai-tools:../radio-drama-app \
+  yarnpkg exec playwright test
+```
+
+These checks encode synthetic PCM through the production Opus encoder and need
+no GPU. GPU synthesis/alignment integration checks require available GPU memory.
+
+Playback follows native media events: `ended` advances to the next chunk and
+`error` reports a failure. Browsers may retry an abruptly disconnected response
+or buffer initial Opus data before starting; the editor adds no buffering timeout.

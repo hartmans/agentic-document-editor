@@ -103,16 +103,8 @@ export async function fetchDocument(documentId: string): Promise<DocumentRespons
   return handleJson(await fetch(join(API_BASE, `/document/${documentId}`)));
 }
 
-export async function fetchChunkAudio(
-  documentId: string,
-  chunkId: number
-): Promise<ArrayBuffer> {
-  const res = await fetch(join(API_BASE, `/chunks/${documentId}/${chunkId}/audio`));
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Audio fetch failed (${res.status}): ${text}`);
-  }
-  return res.arrayBuffer();
+export function chunkAudioUrl(documentId: string, chunkId: number): string {
+  return join(API_BASE, `/chunks/${encodeURIComponent(documentId)}/${chunkId}/audio`);
 }
 
 export async function fetchChunkMarks(

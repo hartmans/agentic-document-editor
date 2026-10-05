@@ -7,7 +7,6 @@ from collections.abc import AsyncIterator
 from contextlib import aclosing
 from dataclasses import fields
 import hashlib
-import io
 import logging
 from pathlib import Path
 import re
@@ -125,19 +124,6 @@ class SpeechService:
                 )
                 chunk.changed = False
 
-    def _task(self, chunk: TextChunk, attribute: str, operation) -> asyncio.Task:
-        task = getattr(chunk, attribute)
-        if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):
-            task = asyncio.create_task(operation())
-            setattr(chunk, attribute, task)
-            self._tasks.add(task)
-            def completed(done):
-                self._tasks.discard(done)
-                if not done.cancelled():
-                    done.exception()
-            task.add_done_callback(completed)
-        return task
-
     @staticmethod
     def audio_available(chunk: TextChunk) -> bool:
         if chunk.plan is None:
@@ -183,23 +169,6 @@ class SpeechService:
                 pass
         request = chunk.plan.registered_request
         return await request.render() if request is not None else await chunk.plan.render()
-
-    async def audio(self, chunk: TextChunk) -> bytes:
-        await self.plan_chunks([chunk])
-        return await asyncio.shield(self._task(chunk, "audio_task", lambda: self._encode_audio(chunk)))
-
-    async def _encode_audio(self, chunk: TextChunk) -> bytes:
-        # Phase 1 compatibility: WAV consumers still wait for a complete result.
-        result = await self._playback_result(chunk)
-        return await asyncio.to_thread(self._wav_bytes, result.audio)
-
-    def _wav_bytes(self, audio) -> bytes:
-        import soundfile as sf
-
-        output = io.BytesIO()
-        sf.write(output, audio, self.production_config.resolved_output_sample_rate,
-                 format="WAV", subtype="PCM_16")
-        return output.getvalue()
 
     async def marks(self, chunk: TextChunk) -> list[SpeechMark]:
         await self.plan_chunks([chunk])
