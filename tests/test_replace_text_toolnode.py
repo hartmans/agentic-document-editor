@@ -3,18 +3,12 @@ import json
 import pytest
 
 from langchain_core.messages import AIMessage, ToolMessage
-from langgraph.prebuilt import ToolNode
-from langgraph.runtime import Runtime
-from langgraph.types import Command
 
 from agentic_editor.document import DocumentState
 from agentic_editor.tools import (
     pause_playback,
-    replace_text,
-    reposition_playback,
     stop_playback,
 )
-
 
 
 @pytest.mark.parametrize(("position", "change_start", "expected_position"), [
@@ -26,14 +20,13 @@ from agentic_editor.tools import (
     (200, 301, 301),
     (200, 500, 500),
 ])
-def test_replace_text_toolnode_executes(position, change_start, expected_position):
+def test_replace_text_graph_executes(tool_graph, position, change_start, expected_position):
     prefix = "x" * change_start
     document = prefix + "Hello world"
     doc_state = DocumentState(
         document=document,
         voice_id="Joanna",
     )
-    tool_node = ToolNode([replace_text])
 
     ai_msg = AIMessage(
         content="",
@@ -51,41 +44,28 @@ def test_replace_text_toolnode_executes(position, change_start, expected_positio
         ],
     )
 
-    runtime = Runtime()
-
-    result = tool_node.invoke(
-        {
-            "messages": [ai_msg],
-            "document_state": doc_state.copy(),
-            "document": document,
-            "position": position,
-        },
-        runtime=runtime,
-    )
-
-    assert isinstance(result, list)
-    assert len(result) == 1
-    assert isinstance(result[0], Command)
-    update = result[0].update
-    # ToolNode should have appended a ToolMessage and returned a document update.
-    assert isinstance(update["messages"][-1], ToolMessage)
-    assert update["messages"][-1].tool_call_id == "call_1"
-    assert update["document"] == prefix + "Hi world"
-    assert update["position"] == expected_position
-    assert json.loads(update["messages"][-1].content) == {
+    result = tool_graph(doc_state, [ai_msg, AIMessage(content="Done.")], position=position)
+    draft = result["document_state"]
+    tool_message = result["messages"][-2]
+    assert isinstance(tool_message, ToolMessage)
+    assert tool_message.tool_call_id == "call_1"
+    assert draft.document == prefix + "Hi world"
+    assert result["position"] == expected_position
+    assert result["response_text"] == "Done."
+    assert json.loads(tool_message.content) == {
         "position": change_start,
         "text": "Hi world",
     }
     assert doc_state.document == document
 
 
-def test_reposition_playback_closes_tool_turn_and_sets_response_text():
+@pytest.mark.parametrize("message", ["Resuming there.", ""])
+def test_reposition_playback_closes_tool_turn_and_sets_response_text(tool_graph, message):
     document = "Start here and continue."
     doc_state = DocumentState(
         document=document,
         voice_id="Joanna",
     )
-    tool_node = ToolNode([reposition_playback])
     ai_msg = AIMessage(
         content="",
         tool_calls=[{
@@ -95,32 +75,23 @@ def test_reposition_playback_closes_tool_turn_and_sets_response_text():
                 "before": "",
                 "target": "continue",
                 "after": ".",
-                "message": "Resuming there.",
+                "message": message,
             },
         }],
     )
 
-    result = tool_node.invoke(
-        {
-            "messages": [ai_msg],
-            "document_state": doc_state,
-            "document": document,
-        },
-        runtime=Runtime(),
-    )
+    update = tool_graph(doc_state, [ai_msg])
 
-    assert isinstance(result, list)
-    update = result[0].update
-    assert update["response_text"] == "Resuming there."
-    assert isinstance(update["messages"][0], ToolMessage)
-    assert json.loads(update["messages"][0].content) == {
+    assert update["response_text"] == message
+    assert isinstance(update["messages"][-2], ToolMessage)
+    assert json.loads(update["messages"][-2].content) == {
         "position": document.index("continue"),
         "text": "continue.",
     }
-    assert update["messages"][1] == AIMessage(content="Resuming there.")
+    assert update["messages"][-1] == AIMessage(content=message)
 
 
-def test_pause_playback_sets_message_and_disposition():
+def test_pause_playback_sets_message_and_disposition(tool_graph):
     ai_msg = AIMessage(
         content="",
         tool_calls=[{
@@ -130,77 +101,53 @@ def test_pause_playback_sets_message_and_disposition():
         }],
     )
 
-    result = ToolNode([pause_playback]).invoke(
-        {"messages": [ai_msg]},
-        runtime=Runtime(),
-    )
-
-    assert isinstance(result, list)
-    command = result[0]
-    assert command.goto == "final"
-    assert command.update["disposition"] == "pause"
-    assert command.update["response_text"] == "Please answer this question."
-    tool_message, assistant_message = command.update["messages"]
+    result = tool_graph(DocumentState("Document", "Joanna"), [ai_msg])
+    assert result["disposition"] == "pause"
+    assert result["response_text"] == "Please answer this question."
+    tool_message, assistant_message = result["messages"][-2:]
     assert isinstance(tool_message, ToolMessage)
     assert tool_message.content == "Please answer this question."
     assert tool_message.tool_call_id == "call_1"
     assert assistant_message == AIMessage(content="Please answer this question.")
 
 
-def test_stop_playback_takes_no_message_and_announces_how_to_resume():
+def test_stop_playback_takes_no_message_and_announces_how_to_resume(tool_graph):
     assert "message" not in stop_playback.args
     ai_msg = AIMessage(
         content="",
         tool_calls=[{"id": "call_1", "name": stop_playback.name, "args": {}}],
     )
 
-    result = ToolNode([stop_playback]).invoke(
-        {"messages": [ai_msg]},
-        runtime=Runtime(),
-    )
-
-    command = result[0]
+    result = tool_graph(DocumentState("Document", "Joanna"), [ai_msg])
     message = "Playback stopped. Press Continue to resume."
-    assert command.goto == "final"
-    assert command.update["disposition"] == "stop"
-    assert command.update["response_text"] == message
-    tool_message, assistant_message = command.update["messages"]
+    assert result["disposition"] == "stop"
+    assert result["response_text"] == message
+    tool_message, assistant_message = result["messages"][-2:]
     assert isinstance(tool_message, ToolMessage)
     assert tool_message.content == message
     assert tool_message.tool_call_id == "call_1"
     assert assistant_message == AIMessage(content=message)
 
 
-def test_replace_text_searches_the_current_mutable_document():
-    original = "alpha beta"
-    current = "alpha beta gamma"
-    doc_state = DocumentState(
-        document=original,
-        voice_id="Joanna",
-    )
-    doc_state.update(" gamma", len(original), len(original))
-    ai_msg = AIMessage(
-        content="",
-        tool_calls=[{
-            "id": "call_1",
-            "name": "replace_text",
-            "args": {
-                "before": "beta ",
-                "old_text": "gamma",
-                "new_text": "delta",
-                "after": "",
-            },
-        }],
-    )
-
-    result = ToolNode([replace_text]).invoke(
-        {
-            "messages": [ai_msg],
-            "document_state": doc_state,
-            "document": current,
-            "position": 0,
-        },
-        runtime=Runtime(),
-    )
-
-    assert result[0].update["document"] == "alpha beta delta"
+def test_successive_edits_and_readers_use_current_draft(tool_graph):
+    published = DocumentState("alpha beta", "Joanna")
+    calls = [
+        ("replace_text", {"before": "alpha ", "old_text": "beta", "new_text": "beta gamma", "after": ""}),
+        ("replace_text", {"before": "beta ", "old_text": "gamma", "new_text": "delta", "after": ""}),
+        ("read_document", {}),
+        ("search_document", {"search_text": "delta"}),
+        ("reposition_playback", {"before": "beta ", "target": "delta", "after": "", "message": "Resuming."}),
+    ]
+    responses = [AIMessage(content="", tool_calls=[{
+        "id": f"call_{i}", "name": name, "args": args,
+    }]) for i, (name, args) in enumerate(calls)]
+    result = tool_graph(published, responses)
+    messages = [message for message in result["messages"] if isinstance(message, ToolMessage)]
+    assert [message.tool_call_id for message in messages] == [f"call_{i}" for i in range(len(calls))]
+    assert json.loads(messages[2].content) == {"position": 0, "text": "alpha beta delta"}
+    assert json.loads(messages[3].content) == [{"position": 0, "text": "alpha beta delta"}]
+    assert json.loads(messages[4].content) == {"position": 11, "text": "delta"}
+    assert result["document_state"].document == "alpha beta delta"
+    assert published.document == "alpha beta"
+    assert result["position"] == 11
+    assert result["response_text"] == "Resuming."

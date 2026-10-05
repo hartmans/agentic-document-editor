@@ -43,7 +43,6 @@ def replace_text(
     after: Annotated[str, Field(max_length=120)],
     *,
     state: Annotated[DocumentState, InjectedState("document_state")],
-    document: Annotated[str, InjectedState("document")],
     context: Annotated[Any, InjectedToolArg] = None,
     tool_call_id: Annotated[str, InjectedToolCallId],
     position: Annotated[int, InjectedState('position')],
@@ -75,17 +74,15 @@ def replace_text(
         else position
     )
     return Command(update={
-        'document': updated,
-        'document_state': state,
         'position': resume_position,
-            'messages': [ToolMessage(
-                content=_tool_response(
-                    updated,
-                    result.index,
-                    max(len(old_text + after), len(new_text + after)),
-                ),
-                tool_call_id=tool_call_id,
-            )],
+        'messages': [ToolMessage(
+            content=_tool_response(
+                updated,
+                result.index,
+                max(len(old_text + after), len(new_text + after)),
+            ),
+            tool_call_id=tool_call_id,
+        )],
     })
 
 @tool(infer_schema=True, parse_docstring=True)
@@ -96,7 +93,6 @@ def reposition_playback(
     message: str = "",
     *,
     state: Annotated[DocumentState, InjectedState("document_state")],
-    document: Annotated[str, InjectedState("document")],
     context: Annotated[Any, InjectedToolArg] = None,
     tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> Command | str:
@@ -117,7 +113,7 @@ def reposition_playback(
         'position': result.index,
         'response_text': message or '',
         'messages': [ToolMessage(
-            content=_tool_response(document, result.index),
+            content=_tool_response(state.document, result.index),
             tool_call_id=tool_call_id,
         ),
         AIMessage(content=message or '')],
@@ -181,7 +177,7 @@ def read_document(
     position: Annotated[int, Field(ge=0)] = 0,
     length: Annotated[int, Field(ge=0)] = DEFAULT_EXCERPT_LENGTH,
     *,
-    document: Annotated[str, InjectedState("document")],
+    state: Annotated[DocumentState, InjectedState("document_state")],
 ) -> str:
     """Read text from the current document starting at a character position.
 
@@ -189,7 +185,7 @@ def read_document(
         position: Character position at which to start reading.
         length: Maximum number of characters to return.
     """
-    return _tool_response(document, position, length)
+    return _tool_response(state.document, position, length)
 
 
 @tool(infer_schema=True, parse_docstring=True)
@@ -199,7 +195,7 @@ def search_document(
     starting_position: Annotated[int, Field(ge=0)] = 0,
     max_hits: Annotated[int, Field(ge=1)] = 10,
     *,
-    document: Annotated[str, InjectedState("document")],
+    state: Annotated[DocumentState, InjectedState("document_state")],
 ) -> str:
     """Search the current document case-insensitively and return excerpts around each hit.
 
@@ -209,6 +205,7 @@ def search_document(
         starting_position: Character position at which to begin searching.
         max_hits: Maximum number of matching excerpts to return.
     """
+    document = state.document
     hits: list[dict[str, int | str]] = []
     search_position = min(starting_position, len(document))
     matches = re.finditer(

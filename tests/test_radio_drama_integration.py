@@ -13,6 +13,7 @@ import sys
 import httpx
 import pytest
 import soundfile as sf
+from langchain_core.messages import AIMessage
 
 import backend
 from agentic_editor.document import TextChunk, DocumentState
@@ -34,6 +35,33 @@ def speech_config(tmp_path):
         "radio_drama": {"device": os.environ.get("RADIO_DRAMA_TEST_DEVICE", "cuda:1")},
         "llm": {"model": "openai:test", "base_url": "http://127.0.0.1:8080/v1", "api_key": "test"},
     }
+
+
+def test_graph_edit_preserves_initialized_speech_resources(tmp_path, speech_config, tool_graph):
+    speech = SpeechService(speech_config, tmp_path / "disposable.txt")
+
+    async def exercise():
+        try:
+            await speech.initialize()
+            published = build_document_state("Hello world.", speech=speech)
+            result = await asyncio.to_thread(tool_graph, published, [
+                AIMessage(content="", tool_calls=[{
+                    "id": "edit", "name": "replace_text", "args": {
+                        "before": "Hello ", "old_text": "world", "new_text": "there", "after": ".",
+                    },
+                }]),
+                AIMessage(content="Done."),
+            ])
+            draft = result["document_state"]
+            assert draft.document == "Hello there."
+            assert published.document == "Hello world."
+            assert draft.speech is speech
+            assert draft.speech._injector is speech._injector
+            assert result["response_text"] == "Done."
+        finally:
+            await speech.close()
+
+    asyncio.run(exercise())
 
 
 def test_shared_chunks_reuse_preparation_and_changed_chunks_prepare_once(tmp_path, speech_config):

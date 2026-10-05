@@ -91,7 +91,6 @@ def instruction_message(document: str, position: int, instructions: str) -> Huma
 @dataclasses.dataclass
 class GraphState:
 
-    document: typing.Optional[str] = None
     document_state: DocumentState|None = None
     position: int|None = None
     chunk_id: int|None = None
@@ -107,29 +106,25 @@ def build_graph_state(
     draft = state.copy()
     position = max(0, min(position, len(draft.document)))
     return GraphState(
-        document=draft.document, document_state=draft, position=position,
+        document_state=draft, position=position,
         chunk_id=draft.find_chunk_id(position),
         messages=[*(messages if messages is not None else initial_messages(draft.document)),
                   instruction_message(draft.document, position, instructions)],
     )
 
 
-async def initial_node(state: GraphState)-> dict:
-    assert state.document_state
-    return {'document': state.document_state.document}
-
 async def _llm_call_with_model(
     llm: langchain_core.language_models.BaseChatModel,
     state: GraphState,
 ) -> dict:
-    assert state.document is not None
+    assert state.document_state is not None
     tool_llm = llm.bind_tools(TOOLS)
     return {
         'messages': [await tool_llm.ainvoke(state.messages)]
         }
 
 async def final(state:GraphState)-> dict:
-    '''Apply document updates and make the user-facing response explicit.'''
+    '''Make the user-facing response explicit, retaining the edited draft.'''
     response_text = state.response_text
     if response_text is None:
         if not state.messages or not isinstance(state.messages[-1], AIMessage):
@@ -139,7 +134,6 @@ async def final(state:GraphState)-> dict:
         content = state.messages[-1].content
         response_text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=True)
     results:dict[str, typing.Any] = {'response_text': response_text}
-    results['document'] = None
     assert state.document_state
     return results
 
@@ -168,12 +162,10 @@ def build_graph(
         return await _llm_call_with_model(graph_llm, state)
 
     graph = StateGraph(GraphState)
-    graph.add_node('initial_node', initial_node)
     graph.add_node("llm_call", llm_call)
     graph.add_node("our_tool_node", our_tool_node)
     graph.add_node("final", final)
-    graph.set_entry_point("initial_node")
-    graph.add_edge('initial_node', 'llm_call')
+    graph.set_entry_point("llm_call")
     graph.add_conditional_edges("llm_call", tools_condition, {
         "tools": "our_tool_node",
         END: "final",
