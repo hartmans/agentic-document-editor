@@ -78,6 +78,7 @@ class TextChunk:
     text: str
     filtered_text: str = ""
     dialogue_lines: List[DialogueLine] = field(default_factory=list)
+    dialogue_line_offsets: List[int] = field(default_factory=list)
     word_correspondences: List[WordCorrespondence] = field(default_factory=list)
     plan: AudioPlan | None = None
     changed: bool = True
@@ -166,6 +167,7 @@ class DocumentState:
                 chunk.text = replacement
                 chunk.filtered_text = ""
                 chunk.dialogue_lines = []
+                chunk.dialogue_line_offsets = []
                 chunk.word_correspondences = []
                 chunk.plan = None
                 chunk.changed = True

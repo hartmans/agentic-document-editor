@@ -77,9 +77,22 @@ class SpeechService:
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
             ).stdout
         matches = match_filtered_words(chunk.text, text)
-        offsets = tuple(sorted({m.spoken_start for m in matches} | {m.spoken_end for m in matches}))
         chunk.filtered_text = text
-        chunk.dialogue_lines = [DialogueLine(self.speaker, text, mark_offsets=offsets)] if text.strip() else []
+        chunk.dialogue_lines = []
+        chunk.dialogue_line_offsets = []
+        start = 0
+        ends = [separator.end() for separator in re.finditer(r"(?:\r?\n\s*){2,}", text)]
+        for end in [*ends, len(text)]:
+            paragraph = text[start:end]
+            if paragraph.strip():
+                offsets = tuple(sorted({
+                    offset - start for match in matches
+                    for offset in (match.spoken_start, match.spoken_end)
+                    if start <= offset <= end
+                }))
+                chunk.dialogue_lines.append(DialogueLine(self.speaker, paragraph, mark_offsets=offsets))
+                chunk.dialogue_line_offsets.append(start)
+            start = end
         chunk.word_correspondences = list(matches)
         chunk.prepared = True
 
@@ -179,14 +192,15 @@ class SpeechService:
             return []
         result = await self._playback_result(chunk)
         timing = await chunk.plan.ensure_timing(chunk.dialogue_lines, result)
-        marks = []
         # The concrete plan calls stay here; playback consumes chunk-local
         # audio/marks, leaving room for a future shared plan plus script slices.
-        for line, span in zip(chunk.dialogue_lines, timing.dialogue_lines, strict=True):
-            starts = {offset: mark.next_start
-                      for offset, mark in zip(line.mark_offsets, span.marks, strict=True)}
-            marks.extend(project_word_marks(chunk.word_correspondences, starts))
-        return sorted(marks, key=lambda mark: mark.time_ms)
+        starts = {}
+        for line, start, span in zip(
+            chunk.dialogue_lines, chunk.dialogue_line_offsets, timing.dialogue_lines, strict=True,
+        ):
+            starts.update({start + offset: mark.next_start
+                           for offset, mark in zip(line.mark_offsets, span.marks, strict=True)})
+        return project_word_marks(chunk.word_correspondences, starts)
 
     async def _ensure_timing(self, chunk: TextChunk, result) -> None:
         if chunk.dialogue_lines:
