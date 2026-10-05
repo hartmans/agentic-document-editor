@@ -85,3 +85,25 @@ test("real MicVAD remains active after overlapping pause/start requests and tear
   const result = await page.evaluate(() => (window as any).checkVadTransitions());
   expect(result).toEqual({ resumed: { listening: true, active: true }, destroyed: true });
 });
+
+test("silent edit resumes the newly mounted document under StrictMode", async ({ page }) => {
+  const requests: string[] = [];
+  page.on("request", (request) => requests.push(request.url()));
+  await page.getByRole("button", {name: "Play", exact: true}).click();
+  await expect.poll(async () => (await audioState(page)).some((a: any) => a.time > 0.3)).toBe(true);
+  await utterance(page, "silent edit");
+  await expect.poll(async () => (await audioState(page)).some((a: any) => a.src.includes("/edited/") && !a.paused)).toBe(true);
+  expect(requests.filter((url) => url.includes("/edited/0/audio"))).toHaveLength(1);
+});
+
+test("ASR completion in the interruption event turn waits for the captured position", async ({ page }) => {
+  await page.getByRole("button", {name: "Play", exact: true}).click();
+  await expect.poll(async () => (await audioState(page)).some((a: any) => a.time > 0.8)).toBe(true);
+  const posted = page.waitForRequest((request) => request.url().endsWith("/instructions"));
+  await page.evaluate(() => {
+    (window as any).voice.onInterrupt();
+    (window as any).voice.onInstructions("pause");
+  });
+  expect((await posted).postDataJSON().resumePoint).toEqual({documentId: "complete", docCharPosition: 6});
+  await expect(page.getByRole("heading", {name: "Response", exact: true})).toBeVisible();
+});

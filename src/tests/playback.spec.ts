@@ -99,3 +99,37 @@ test("DocumentPlayback starts without marks and resolves interruption after mark
   expect(await page.locator("#resolved").textContent()).toBe("");
   await expect(page.locator("#resolved")).toContainText('"docCharPosition":6');
 });
+
+
+test("StrictMode initial playback makes one audio request and silent completion fires once", async ({ page }) => {
+  const requests: string[] = [];
+  page.on("request", (request) => requests.push(request.url()));
+  await page.goto("/src/tests/player.html?autoplay");
+  await expect(page.locator("#playing")).toHaveText("true");
+  expect(requests.filter((url) => url.includes("/chunks/complete/0/audio"))).toHaveLength(1);
+  await page.goto("/src/tests/player.html?document=silent&autoplay");
+  await expect(page.locator("#ended")).toHaveText("1");
+  await page.waitForTimeout(100);
+  await expect(page.locator("#ended")).toHaveText("1");
+});
+
+test("a changed starting position seeks without an imperative handle or command token", async ({ page }) => {
+  await page.getByRole("button", {name: "Start", exact: true}).click();
+  await expect(page.locator("#playing")).toHaveText("true");
+  await page.getByRole("button", {name: "Seek", exact: true}).click();
+  await expect(page.locator("#playing")).toHaveText("true");
+  await page.getByRole("button", {name: "Interrupt", exact: true}).click();
+  await expect(page.locator("#resolved")).toContainText('"docCharPosition":6');
+});
+
+test("pausing a pending start prevents late audio playback", async ({ page }) => {
+  await page.goto("/src/tests/player.html?document=pending");
+  const request = page.waitForRequest((request) => request.url().includes("/pending/0/audio"));
+  await page.getByRole("button", {name: "Start", exact: true}).click();
+  await request;
+  await page.getByRole("button", {name: "Interrupt", exact: true}).click();
+  await expect(page.locator("#resolved")).toContainText('"docCharPosition":0');
+  await page.waitForTimeout(5200);
+  await expect(page.locator("#playing")).toHaveText("false");
+  await expect(page.locator("#ended")).toHaveText("0");
+});

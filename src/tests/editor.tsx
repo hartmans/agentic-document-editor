@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { MicVAD } from "@ricky0123/vad-web";
 import { AudioCtx } from "../context/AudioContextProvider";
@@ -32,4 +32,4 @@ Object.assign(window, { checkVadTransitions: async () => {
     await context.close();
   }
 } });
-createRoot(document.getElementById("root")!).render(<Harness />);
+createRoot(document.getElementById("root")!).render(<StrictMode><Harness /></StrictMode>);

@@ -1,297 +1,174 @@
-import { useEffect, useRef, useState } from "react";
-import {
-  ApiError,
-  DocumentResponse,
-  fetchStatus,
-  postInstructions,
-} from "../api";
+import { useContext, useEffect, useReducer } from "react";
+import { ApiError, type DocumentResponse, type InstructionsResponse, fetchStatus, postInstructions } from "../api";
+import { AudioCtx } from "../context/AudioContextProvider";
 import { VoiceInput } from "./VoiceInput";
-import { DocumentPlayback, DocumentPlaybackHandle } from "./DocumentPlayback";
-import type { PlaybackPosition } from "../audio/speechMarks";
+import { DocumentPlayback } from "./DocumentPlayback";
+import { loadSpeechMarks, resolvePlaybackPosition, type PlaybackPosition } from "../audio/speechMarks";
 import { instructionsSentUrl, play } from "../audio/sounds";
 
-interface DocumentSnapshot {
-  documentId: string;
-  document: DocumentResponse;
+interface Snapshot { documentId: string; document: DocumentResponse }
+interface Response extends Snapshot { disposition: "play" | "pause" | "stop" }
+type Playing = { kind: "playing"; source: "document" | "response"; position: PlaybackPosition };
+type Mode = Playing | { kind: "idle" | "paused" }
+  | { kind: "capturing"; prior: Playing; next: "idle" | "paused" | "listening"; text: string | null }
+  | { kind: "listening"; restore: Playing | null; fallback: "paused" | "idle"; text: string | null }
+  | { kind: "processing"; override: "idle" | "paused" | null };
+interface Submission { text: string; snapshot: Snapshot; position: PlaybackPosition }
+interface State {
+  snapshot: Snapshot | null;
+  response: Response | null;
+  resume: PlaybackPosition | null;
+  mode: Mode;
+  submission: Submission | null;
+  error: string | null;
 }
+type Action = { type: "loaded"; snapshot: Snapshot }
+  | { type: "play" } | { type: "pause" } | { type: "stop" } | { type: "interrupt" }
+  | { type: "transcript"; text: string } | { type: "submit" }
+  | { type: "captured"; source: Playing["source"]; position: PlaybackPosition }
+  | { type: "ended"; source: Playing["source"]; documentId: string }
+  | { type: "result"; result: InstructionsResponse }
+  | { type: "failed"; message: string; snapshot?: Snapshot }
+  | { type: "playbackFailed"; message: string; source: Playing["source"]; documentId: string };
+const initial: State = { snapshot: null, response: null, resume: null, mode: { kind: "idle" }, submission: null, error: null };
 
-interface ResponsePlayback extends DocumentSnapshot {
-  intent: number;
-  // Resuming an interrupted reply updates its intent without remounting its player.
-  playbackKey: number;
-  disposition: "play" | "pause" | "stop";
+function documentPlayback(state: State): Playing {
+  return { kind: "playing", source: "document",
+    position: state.resume ?? { documentId: state.snapshot!.documentId, docCharPosition: 0 } };
+}
+function afterResponse(state: State, disposition: Response["disposition"]): Mode {
+  return disposition === "play" ? documentPlayback(state)
+    : { kind: disposition === "pause" ? "paused" : "idle" };
+}
+function reducer(state: State, action: Action): State {
+  const mode = state.mode;
+  switch (action.type) {
+    case "loaded": return { ...state, snapshot: action.snapshot };
+    case "play":
+      if (!state.snapshot || state.submission || mode.kind === "capturing" || mode.kind === "playing") return state;
+      return { ...state, mode: documentPlayback(state), error: null };
+    case "pause":
+    case "stop": {
+      const next = action.type === "pause" ? "paused" : "idle";
+      if (mode.kind === "playing") return { ...state, mode: { kind: "capturing", prior: mode, next, text: null } };
+      if (mode.kind === "capturing") return { ...state, mode: { ...mode, next, text: null } };
+      if (mode.kind === "processing") return { ...state, mode: { ...mode, override: next } };
+      return { ...state, mode: { kind: next } };
+    }
+    case "interrupt":
+      if (mode.kind === "processing" || mode.kind === "capturing" || mode.kind === "listening") return state;
+      return { ...state, mode: mode.kind === "playing"
+        ? { kind: "capturing", prior: mode, next: "listening", text: null }
+        : { kind: "listening", restore: null, fallback: mode.kind === "idle" ? "idle" : "paused", text: null } };
+    case "captured": {
+      // Effect replay reports snapshots too, but it never requests a pause.
+      // Only the explicit capture transition can consume this callback.
+      if (mode.kind !== "capturing" || mode.prior.source !== action.source
+          || mode.prior.position.documentId !== action.position.documentId) return state;
+      const resume = action.source === "document" ? action.position : state.resume;
+      return { ...state, resume, mode: mode.next === "listening"
+        ? { kind: "listening", restore: { ...mode.prior, position: action.position }, fallback: "paused", text: mode.text }
+        : { kind: mode.next } };
+    }
+    case "transcript":
+      if (mode.kind === "capturing" && mode.next === "listening") return { ...state, mode: { ...mode, text: action.text } };
+      if (mode.kind === "listening") return { ...state, mode: { ...mode, text: action.text } };
+      if (mode.kind === "paused" || mode.kind === "idle") return { ...state, mode: { kind: "listening", restore: null, fallback: mode.kind, text: action.text } };
+      return state;
+    case "submit":
+      if (mode.kind !== "listening" || mode.text === null || !state.snapshot) return state;
+      if (!mode.text.trim()) return { ...state, mode: mode.restore ?? { kind: mode.fallback } };
+      return { ...state, error: null, response: null, mode: { kind: "processing", override: null },
+        submission: { text: mode.text.trim(), snapshot: state.snapshot,
+          position: state.resume ?? { documentId: state.snapshot.documentId, docCharPosition: 0 } } };
+    case "result": {
+      if (!state.submission || mode.kind !== "processing") return state;
+      const result = action.result;
+      const next = { ...state, snapshot: { documentId: result.documentId, document: result.document },
+        resume: result.resumePoint, submission: null,
+        response: { documentId: result.responseDocumentId, document: result.responseDocument, disposition: result.disposition } };
+      const audible = result.responseDocument.chunks.some((chunk) => chunk.has_audio !== false);
+      return { ...next, mode: mode.override ? { kind: mode.override }
+        : audible ? { kind: "playing", source: "response", position: { documentId: result.responseDocumentId, docCharPosition: 0 } }
+        : afterResponse(next, result.disposition) };
+    }
+    case "ended":
+      if (mode.kind !== "playing" || mode.source !== action.source || mode.position.documentId !== action.documentId) return state;
+      return { ...state, mode: action.source === "response" && state.response
+        ? afterResponse(state, state.response.disposition) : { kind: "paused" } };
+    case "playbackFailed":
+      if (mode.kind !== "playing" || mode.source !== action.source || mode.position.documentId !== action.documentId) return state;
+      return { ...state, error: action.message, mode: { kind: "capturing", prior: mode, next: "paused", text: null } };
+    case "failed":
+      return { ...state, error: action.message, submission: null, mode: { kind: action.snapshot ? "idle" : "paused" },
+        ...(action.snapshot ? { snapshot: action.snapshot, resume: null, response: null } : {}) };
+  }
 }
 
 export function DocumentEditor() {
-  const [snapshot, setSnapshot] = useState<DocumentSnapshot | null>(null);
-  const [response, setResponse] = useState<ResponsePlayback | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [playing, setPlaying] = useState(false);
-  const [starting, setStarting] = useState(false);
-  const [instructionsPending, setInstructionsPending] = useState(false);
-  const [voiceMode, setVoiceMode] = useState<"idle" | "armed" | "waiting">("idle");
-  const [resumePoint, setResumePoint] = useState<PlaybackPosition | null>(null);
-  const playbackRef = useRef<DocumentPlaybackHandle | null>(null);
-  const responsePlaybackRef = useRef<DocumentPlaybackHandle | null>(null);
-  const mountedRef = useRef(false);
-  const instructionRef = useRef<object | null>(null);
-  const intentRef = useRef(0);
-  const startingRef = useRef(false);
-  const responseActiveRef = useRef(false);
-  const interruptedRef = useRef<{
-    intent: number;
-    source: "document" | "response";
-    position?: PlaybackPosition;
-  } | null>(null);
-  const resumePointRef = useRef<PlaybackPosition | null>(null);
-
+  const { audioContext } = useContext(AudioCtx);
+  const [state, dispatch] = useReducer(reducer, initial);
+  const { snapshot, response, mode, submission, error } = state;
   useEffect(() => {
-    mountedRef.current = true;
-    let cancelled = false;
-    void fetchStatus().then((status) => {
-      if (!cancelled) setSnapshot(status);
-    }).catch((err: Error) => {
-      if (!cancelled) setError(err.message);
-    });
-    return () => {
-      cancelled = true;
-      mountedRef.current = false;
-      instructionRef.current = null;
-      intentRef.current += 1;
-    };
+    let active = true;
+    void fetchStatus().then((snapshot) => { if (active) dispatch({ type: "loaded", snapshot }); })
+      .catch((err: Error) => { if (active) dispatch({ type: "failed", message: err.message }); });
+    return () => { active = false; };
   }, []);
-
-  const clearResponse = () => {
-    responseActiveRef.current = false;
-    responsePlaybackRef.current?.stop();
-    setResponse(null);
-  };
-
-  const handlePlay = async () => {
-    if (instructionRef.current || startingRef.current || playing) return;
-    const intent = ++intentRef.current;
-    startingRef.current = true;
-    setStarting(true);
-    clearResponse();
-    try {
-      const resume = resumePointRef.current;
-      if (!mountedRef.current || intent !== intentRef.current) return;
-      if (!playbackRef.current) throw new Error("Playback not ready. Enable microphone and wait a moment.");
-      await playbackRef.current.play(resume ?? undefined);
-      // The player reports actual starts. A cancelled play must not set playing.
-    } catch (err) {
-      if (mountedRef.current && intent === intentRef.current) setError((err as Error).message);
-    } finally {
-      if (mountedRef.current && intent === intentRef.current) {
-        startingRef.current = false;
-        setStarting(false);
-      }
-    }
-  };
-
-  function rememberInterruption(info: PlaybackPosition | undefined, intent: number) {
-    if (!snapshot || !info || info.documentId !== snapshot.documentId) return;
-    if (mountedRef.current && intent === intentRef.current) {
-      resumePointRef.current = info;
-      setResumePoint(info);
-    }
-  }
-
-  const handleStop = () => {
-    interruptedRef.current = null;
-    const intent = ++intentRef.current;
-    const info = playbackRef.current?.stop();
-    if (playing || startingRef.current) rememberInterruption(info, intent);
-    startingRef.current = false;
-    setStarting(false);
-    clearResponse();
-    setVoiceMode("idle");
-  };
-
-  const handlePause = () => {
-    interruptedRef.current = null;
-    const intent = ++intentRef.current;
-    const info = playbackRef.current?.stop();
-    if (playing || startingRef.current) rememberInterruption(info, intent);
-    startingRef.current = false;
-    setStarting(false);
-    clearResponse();
-    setVoiceMode("armed");
-  };
-
-  const handleInterrupt = () => {
-    if (instructionRef.current || interruptedRef.current) return;
-    const intent = ++intentRef.current;
-    const documentActive = playing || startingRef.current;
-    const info = playbackRef.current?.stop();
-    if (documentActive) rememberInterruption(info, intent);
-    const responseActive = responseActiveRef.current;
-    const responsePosition = responsePlaybackRef.current?.stop();
-    interruptedRef.current = responseActive
-      ? { intent, source: "response", position: responsePosition }
-      : documentActive ? { intent, source: "document", position: info } : null;
-    startingRef.current = false;
-    setStarting(false);
-  };
-
-  const handleInstructions = async (instructions: string) => {
-    if (instructionRef.current || !snapshot) return;
-    const trimmed = instructions.trim();
-    const interrupted = interruptedRef.current;
-    interruptedRef.current = null;
-    if (!trimmed) {
-      if (interrupted?.intent !== intentRef.current) return;
-      if (interrupted.source === "document") {
-        void handlePlay();
-      } else {
-        setResponse((current) => current && { ...current, intent: interrupted.intent });
-        void responsePlaybackRef.current?.play(interrupted.position).catch((err: Error) => {
-          if (mountedRef.current && interrupted.intent === intentRef.current) setError(err.message);
-        });
-      }
-      return;
-    }
-    clearResponse();
-    const operation = {};
-    instructionRef.current = operation;
-    const intent = intentRef.current;
-    const isCurrent = () => mountedRef.current && instructionRef.current === operation;
-    setInstructionsPending(true);
-    setVoiceMode("waiting");
-    setError(null);
-    try {
-      const captured = resumePointRef.current;
-      const player = playbackRef.current;
-      if (captured && !player) throw new Error("Playback not ready");
-      const point = captured ? await player!.resolvePosition(captured) : null;
-      if (!isCurrent()) return;
-      void play(instructionsSentUrl);
-      const result = await postInstructions({
-        baseDocumentId: snapshot.documentId,
-        instructions: trimmed,
-        resumePoint: {
-          documentId: snapshot.documentId,
-          docCharPosition: point?.docCharPosition ?? 0,
-        },
-      });
-      if (!isCurrent()) return;
-      // Install the revision and its resume point together; no status refetch.
-      setSnapshot({ documentId: result.documentId, document: result.document });
-      setResumePoint(result.resumePoint);
-      resumePointRef.current = result.resumePoint;
-      if (intent === intentRef.current) {
-        responseActiveRef.current = true;
-        setResponse({
-          documentId: result.responseDocumentId,
-          document: result.responseDocument,
-          intent,
-          playbackKey: intent,
-          disposition: result.disposition,
-        });
-      }
-    } catch (err) {
-      if (!isCurrent()) return;
-      if (err instanceof ApiError && err.status === 409) {
-        // Another tab edited this revision. Refresh, but do not replay stale
-        // instructions or carry their conversation/position into the new text.
-        try {
-          const status = await fetchStatus();
-          if (!isCurrent()) return;
-          setSnapshot(status);
-          setResumePoint(null);
-          resumePointRef.current = null;
-          setError("The document changed in another session. Loaded the latest revision; please repeat your instruction.");
-        } catch (refreshError) {
-          if (isCurrent()) setError((refreshError as Error).message);
-        }
-        if (isCurrent()) setVoiceMode("idle");
-      } else {
-        setError((err as Error).message);
-        if (intent === intentRef.current) setVoiceMode("armed");
-      }
-    } finally {
-      if (isCurrent()) {
-        instructionRef.current = null;
-        setInstructionsPending(false);
-      }
-    }
-  };
-
-  const handleResponseEnd = () => {
-    if (!response || response.intent !== intentRef.current) return;
-    responseActiveRef.current = false;
-    if (response.disposition === "play") {
-      void handlePlay();
-    } else if (response.disposition === "pause") {
-      setVoiceMode("armed");
-    } else {
-      setVoiceMode("idle");
-    }
-  };
-
-  const handleDocumentPlayingChange = (isPlaying: boolean) => {
-    setPlaying(isPlaying);
-    if (isPlaying) setVoiceMode("armed");
-  };
-
-  const handleResponsePlayingChange = (isPlaying: boolean) => {
-    if (isPlaying && response?.disposition !== "stop") setVoiceMode("armed");
-  };
-
   useEffect(() => {
-    // Reposition instructions can intentionally have no spoken response.
-    if (response && response.document.chunks.length === 0) handleResponseEnd();
-  }, [response]);
+    if (mode.kind === "listening" && mode.text !== null) dispatch({ type: "submit" });
+  }, [mode]);
+  useEffect(() => {
+    if (!submission) return;
+    let active = true;
+    void (async () => {
+      try {
+        const point = await resolvePlaybackPosition(submission.position, submission.snapshot.document.chunks,
+          (chunkId) => loadSpeechMarks(submission.snapshot.documentId, chunkId));
+        if (!active) return;
+        void play(instructionsSentUrl);
+        const result = await postInstructions({ baseDocumentId: submission.snapshot.documentId,
+          instructions: submission.text, resumePoint: point });
+        if (active) dispatch({ type: "result", result });
+      } catch (err) {
+        if (!active) return;
+        if (err instanceof ApiError && err.status === 409) {
+          try {
+            const snapshot = await fetchStatus();
+            if (active) dispatch({ type: "failed", snapshot,
+              message: "The document changed in another session. Loaded the latest revision; please repeat your instruction." });
+          } catch (refreshError) { if (active) dispatch({ type: "failed", message: (refreshError as Error).message }); }
+        } else dispatch({ type: "failed", message: (err as Error).message });
+      }
+    })();
+    return () => { active = false; };
+  }, [submission]);
 
   if (!snapshot) return <div>{error ?? "Loading document..."}</div>;
-  const { document: doc, documentId } = snapshot;
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-      <div>{`Voice ${doc.voice_id}, chunks ${doc.chunks.length}, strategy ${doc.chunking_strategy}`}</div>
-      {instructionsPending && <div role="status">Processing instructions…</div>}
-      <VoiceInput
-        enabled={voiceMode === "armed" && !instructionsPending}
-        onInterrupt={handleInterrupt}
-        onInstructions={handleInstructions}
-      />
-      {response && (
-        <DocumentPlayback
-          ref={responsePlaybackRef}
-          title="Response"
-          documentId={response.documentId}
-          documentText={response.document.document}
-          chunks={response.document.chunks}
-          autoPlay
-          onPlayingChange={handleResponsePlayingChange}
-          onNaturalEnd={handleResponseEnd}
-          key={`response/${response.documentId}/${response.playbackKey}`}
-        />
-      )}
-      <DocumentPlayback
-        ref={playbackRef}
-        title="Document"
-        documentId={documentId}
-        documentText={doc.document}
-        chunks={doc.chunks}
-        key={documentId}
-        onPlayingChange={handleDocumentPlayingChange}
-      />
-      <div style={{ display: "flex", gap: "0.5rem" }}>
-        <button onClick={handlePlay} disabled={playing || starting || instructionsPending}>
-          Play
-        </button>
-        <button onClick={handlePause} disabled={!playing && !starting && !response}>
-          Pause
-        </button>
-        <button onClick={handleStop} disabled={voiceMode === "idle" && !starting && !response}>
-          Stop
-        </button>
-        <button onClick={handlePlay} disabled={!resumePoint || playing || starting || instructionsPending}>
-          Continue
-        </button>
-      </div>
-      {error && <div style={{ color: "red" }}>{error}</div>}
+  const armed = mode.kind !== "idle" && mode.kind !== "processing"
+    && !(mode.kind === "capturing" && mode.next === "idle")
+    && !(mode.kind === "playing" && mode.source === "response" && response?.disposition === "stop");
+  const player = (source: Playing["source"], item: Snapshot) => <DocumentPlayback
+    title={source === "document" ? "Document" : "Response"}
+    documentId={item.documentId} documentText={item.document.document} chunks={item.document.chunks}
+    position={mode.kind === "playing" && mode.source === source ? mode.position : null}
+    onPositionCaptured={(position) => dispatch({ type: "captured", source, position })}
+    onNaturalEnd={() => dispatch({ type: "ended", source, documentId: item.documentId })}
+    onPlaybackError={(err) => dispatch({ type: "playbackFailed", source, documentId: item.documentId, message: err.message })}
+    key={`${source}/${item.documentId}`} />;
+  return <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+    <div>{`Voice ${snapshot.document.voice_id}, chunks ${snapshot.document.chunks.length}, strategy ${snapshot.document.chunking_strategy}`}</div>
+    {submission && <div role="status">Processing instructions…</div>}
+    <VoiceInput enabled={armed} onInterrupt={() => dispatch({ type: "interrupt" })}
+      onInstructions={(text) => dispatch({ type: "transcript", text })} />
+    {response && response.document.document && player("response", response)}
+    {player("document", snapshot)}
+    <div style={{ display: "flex", gap: "0.5rem" }}>
+      <button onClick={() => dispatch({ type: "play" })} disabled={!audioContext || Boolean(submission) || mode.kind === "playing" || mode.kind === "capturing"}>Play</button>
+      <button onClick={() => dispatch({ type: "pause" })} disabled={mode.kind === "paused" || mode.kind === "idle"}>Pause</button>
+      <button onClick={() => dispatch({ type: "stop" })} disabled={mode.kind === "idle"}>Stop</button>
+      <button onClick={() => dispatch({ type: "play" })} disabled={!audioContext || !state.resume || Boolean(submission) || mode.kind === "playing" || mode.kind === "capturing"}>Continue</button>
     </div>
-  );
+    {error && <div style={{ color: "red" }}>{error}</div>}
+  </div>;
 }

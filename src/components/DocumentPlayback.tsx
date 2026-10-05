@@ -1,18 +1,8 @@
-import {
-  useContext,
-  useEffect,
-  useEffectEvent,
-  useLayoutEffect,
-  useImperativeHandle,
-  useMemo,
-  useRef,
-  useState,
-  Ref,
-} from "react";
+import { useContext, useEffect, useEffectEvent, useMemo, useState } from "react";
 import { AudioEngine } from "../audio/AudioEngine";
 import { AudioCtx } from "../context/AudioContextProvider";
-import { ResumePoint, WordMark, chunkAudioUrl, fetchChunkMarks } from "../api";
-import { chunkForPosition, markAtTime, timeAtPosition, resolvePlaybackPosition, PlaybackPosition } from "../audio/speechMarks";
+import { WordMark, chunkAudioUrl } from "../api";
+import { chunkForPosition, loadSpeechMarks, markAtTime, timeAtPosition, type PlaybackPosition } from "../audio/speechMarks";
 import { marksForStart } from "../audio/playbackReadiness";
 
 export interface ChunkRef {
@@ -21,276 +11,146 @@ export interface ChunkRef {
   has_audio?: boolean;
 }
 
-export interface DocumentPlaybackHandle {
-  play: (resume?: PlaybackPosition) => Promise<void>;
-  stop: () => PlaybackPosition;
-  resolvePosition: (point: PlaybackPosition) => Promise<ResumePoint>;
-}
-
-let globalComponentNumber = 0;
-
 interface Props {
   title?: string;
   documentText: string;
   chunks: ChunkRef[];
   documentId: string;
+  // A fixed starting point while playback is wanted; null means paused.
+  position: PlaybackPosition | null;
+  onPositionCaptured?: (position: PlaybackPosition) => void;
   onPlayingChange?: (playing: boolean) => void;
   onNaturalEnd?: () => void;
-  autoPlay?: boolean;
+  onPlaybackError?: (error: Error) => void;
 }
 
-export function DocumentPlayback({
-  title = "Document",
-  documentText,
-  chunks,
-  documentId,
-  onPlayingChange,
-  onNaturalEnd,
-  autoPlay = false,
-  ref,
-}: Props & { ref?: Ref<DocumentPlaybackHandle> }) {
-    const { audioContext } = useContext(AudioCtx);
-    const audioEngineRef = useRef<AudioEngine | null>(null);
-    const generationRef = useRef(0);
-    const pendingStartRef = useRef<PlaybackPosition | null>(null);
-    const marksRef = useRef<Map<string, WordMark[]>>(new Map());
-    const pendingMarksRef = useRef<Map<string, Promise<WordMark[]>>>(new Map());
-    const lastPositionRef = useRef<PlaybackPosition>({ documentId, docCharPosition: 0 });
-    const [highlight, setHighlight] = useState<WordMark | null>(null);
-    const [buffering, setBuffering] = useState(false);
-    const [error, setError] = useState<string | null>(null);
-    const playingRef = useRef(false);
-    const componentNumber = useMemo(() => {return ++globalComponentNumber}, []);
+export function DocumentPlayback({ title = "Document", documentText, chunks, documentId,
+  position, onPositionCaptured, onPlayingChange, onNaturalEnd, onPlaybackError }: Props) {
+  const { audioContext } = useContext(AudioCtx);
+  const [highlight, setHighlight] = useState<WordMark | null>(null);
+  const [buffering, setBuffering] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const reportPosition = useEffectEvent((point: PlaybackPosition) => onPositionCaptured?.(point));
+  const reportPlaying = useEffectEvent((playing: boolean) => onPlayingChange?.(playing));
+  const reportEnd = useEffectEvent(() => onNaturalEnd?.());
+  const reportError = useEffectEvent((err: Error) => onPlaybackError?.(err));
 
-    const emitNaturalEnd = useEffectEvent(() => onNaturalEnd?.());
-
-    useLayoutEffect(() => {
-      if (audioContext) {
-        audioEngineRef.current = new AudioEngine();
-      }
-      return () => {
-        generationRef.current += 1;
-        pendingStartRef.current = null;
-        playingRef.current = false;
-        audioEngineRef.current?.stop();
-        audioEngineRef.current = null;
-        console.log('DocumentPlayback cleanup', {componentNumber});
-      };
-    }, [audioContext, documentId]);
-
-    const updateHighlight = useEffectEvent(() => {
-      if (!playingRef.current) return;
-      const info = audioEngineRef.current?.getCurrentPlaybackInfo();
-      if (info?.playingChunkId == null) return;
-      const marks = marksRef.current.get(`${documentId}/${info.playingChunkId}`) ?? [];
-      const mark = markAtTime(marks, info.offsetSeconds * 1000);
-      if (mark) {
-        setHighlight((previous) => previous === mark ? previous : mark);
-      }
-    });
-
-    useEffect(() => {
-      let frame: number;
-      const tick = () => {
-        updateHighlight();
-        frame = requestAnimationFrame(tick);
-      };
-      frame = requestAnimationFrame(tick);
-      return () => cancelAnimationFrame(frame);
-    }, [audioContext, documentId]);
-
-    async function loadMarks(chunkId: number): Promise<WordMark[]> {
-      const key = `${documentId}/${chunkId}`;
-      const cached = marksRef.current.get(key);
-      if (cached) return cached;
-      let pending = pendingMarksRef.current.get(key);
-      if (!pending) {
-        pending = fetchChunkMarks(documentId, chunkId).then((result) => {
-          if (result.documentId !== documentId || result.chunkId !== chunkId) {
-            throw new Error("Speech marks belong to another document chunk");
-          }
-          marksRef.current.set(key, result.marks);
-          return result.marks;
-        }).finally(() => pendingMarksRef.current.delete(key));
-        pendingMarksRef.current.set(key, pending);
-      }
-      return pending;
+  useEffect(() => {
+    if (!position || !audioContext) {
+      setBuffering(false);
+      reportPlaying(false);
+      return;
     }
-
-    async function startChunk(chunkId: number, docCharPosition: number,
-                              generation = generationRef.current, knownOffsetMs?: number) {
-      if (!audioEngineRef.current || !audioContext) return;
-      if (chunks[chunkId].has_audio === false) {
-        handleNaturalEnd(chunkId, generation);
-        return;
-      }
-      pendingStartRef.current = { documentId, docCharPosition, chunkId, offsetMs: knownOffsetMs };
-      setError(null);
+    const engine = new AudioEngine();
+    let active = true;
+    let frame = 0;
+    let point = position;
+    // These belong to this execution, not to the component's playback intent.
+    const marksCache = new Map<number, WordMark[]>();
+    const loadMarks = (chunkId: number): Promise<WordMark[]> => {
+      const cached = marksCache.get(chunkId);
+      if (cached) return Promise.resolve(cached);
+      return loadSpeechMarks(documentId, chunkId).then((marks) => {
+        marksCache.set(chunkId, marks);
+        return marks;
+      });
+    };
+    const capture = (): PlaybackPosition => {
+      const info = engine.stop();
+      if (info.playingChunkId === null) return point;
+      const marks = marksCache.get(info.playingChunkId) ?? [];
+      return { documentId, chunkId: info.playingChunkId,
+        docCharPosition: markAtTime(marks, info.offsetSeconds * 1000)?.docCharStart ?? point.docCharPosition,
+        offsetMs: Math.max(0, info.offsetSeconds * 1000) };
+    };
+    const fail = (err: Error) => {
+      if (!active) return;
+      setError(err.message);
+      setBuffering(false);
+      reportPlaying(false);
+      reportError(err);
+    };
+    const finish = () => {
+      if (!active) return;
+      point = { documentId, docCharPosition: chunks[chunks.length - 1]?.doc_char_end ?? 0 };
+      setBuffering(false);
+      reportPlaying(false);
+      reportEnd();
+    };
+    const startChunk = async (chunkId: number, target: PlaybackPosition) => {
       try {
-        // Handle rejection immediately even when audio starts without awaiting
-        // timing. The animation loop picks up late marks at the current time.
+        // Always yield before completion, including empty/silent documents.
+        // Cleanup can invalidate this execution before it emits any event.
+        await Promise.resolve();
+        if (!active) return;
+        while (chunkId < chunks.length && chunks[chunkId].has_audio === false) chunkId++;
+        if (chunkId >= chunks.length) { finish(); return; }
+        const start = chunks[chunkId].doc_char_start;
+        const charPosition = Math.max(start, target.docCharPosition);
+        const knownOffset = target.chunkId === chunkId ? target.offsetMs : undefined;
+        point = { documentId, docCharPosition: charPosition, chunkId, offsetMs: knownOffset };
         const marksResult = loadMarks(chunkId).then(
           (marks) => ({ marks, error: null }),
-          (error: Error) => ({ marks: [] as WordMark[], error }),
+          (err: Error) => ({ marks: [] as WordMark[], error: err }),
         );
-        const needsTiming = knownOffsetMs === undefined && docCharPosition > chunks[chunkId].doc_char_start;
-        const marks = await marksForStart(
-          docCharPosition, chunks[chunkId].doc_char_start, knownOffsetMs, marksResult,
-          marksRef.current.get(`${documentId}/${chunkId}`) ?? [],
-        );
-        if (generation !== generationRef.current) return;
-        if (!needsTiming) {
-          void marksResult.then((result) => {
-            if (result.error && generation === generationRef.current
-                && audioEngineRef.current?.getCurrentPlaybackInfo().playingChunkId === chunkId) {
-              setError(`Audio timing unavailable: ${result.error.message}`);
-            }
-          });
-        }
-        if (playingRef.current || !audioEngineRef.current) return;
-        const offsetMs = knownOffsetMs ?? (needsTiming ? timeAtPosition(marks, docCharPosition) : 0);
-        lastPositionRef.current = {
-          documentId,
-          docCharPosition: marks.length ? docCharPosition : chunks[chunkId].doc_char_start,
-        };
-        setHighlight(markAtTime(marks, offsetMs) ?? null);
-        const started = await audioEngineRef.current.playChunk(
-          chunkId, chunkAudioUrl(documentId, chunkId), offsetMs / 1000, {
-            onEnded: () => {
-              if (generation !== generationRef.current) return;
-              pendingStartRef.current = null;
-              playingRef.current = false;
-              handleNaturalEnd(chunkId, generation);
-            },
-            onError: (error, position) => {
-              if (generation !== generationRef.current) return;
-              playingRef.current = false;
-              lastPositionRef.current = {
-                ...lastPositionRef.current, chunkId,
-                offsetMs: Math.max(0, position.offsetSeconds * 1000),
-              };
-              setError(error.message);
-              onPlayingChange?.(false);
-            },
-            onBuffering: (value) => {
-              if (generation === generationRef.current) setBuffering(value);
-            },
+        const marks = await marksForStart(charPosition, start, knownOffset, marksResult,
+          marksCache.get(chunkId) ?? []);
+        if (!active) return;
+        const offset = knownOffset ?? (charPosition > start ? timeAtPosition(marks, charPosition) : 0);
+        setHighlight(markAtTime(marks, offset) ?? null);
+        void marksResult.then((result) => {
+          if (active && result.error) setError(`Audio timing unavailable: ${result.error.message}`);
+        });
+        const started = await engine.playChunk(chunkId, chunkAudioUrl(documentId, chunkId), offset / 1000, {
+          onEnded: () => {
+            if (!active) return;
+            const next = chunkId + 1;
+            void startChunk(next, { documentId, docCharPosition: chunks[next]?.doc_char_start ?? charPosition });
           },
-        );
-        if (generation !== generationRef.current || !started) return;
-        pendingStartRef.current = null;
-        playingRef.current = true;
-        onPlayingChange?.(true);
-      } catch (err) {
-        if (generation !== generationRef.current) return;
-        lastPositionRef.current = { documentId, docCharPosition };
-        pendingStartRef.current = null;
-        playingRef.current = false;
-        setError((err as Error).message);
-        onPlayingChange?.(false);
+          onError: (err, info) => {
+            point = { ...point, chunkId, offsetMs: Math.max(0, info.offsetSeconds * 1000) };
+            fail(err);
+          },
+          onBuffering: (value) => { if (active) setBuffering(value); },
+        });
+        if (active && started) reportPlaying(true);
+      } catch (err) { fail(err as Error); }
+    };
+    const tick = () => {
+      if (!active) return;
+      const info = engine.getCurrentPlaybackInfo();
+      if (info.playingChunkId !== null) {
+        const mark = markAtTime(marksCache.get(info.playingChunkId) ?? [], info.offsetSeconds * 1000);
+        if (mark) setHighlight((previous) => previous === mark ? previous : mark);
       }
+      frame = requestAnimationFrame(tick);
+    };
+    setError(null);
+    setBuffering(true);
+    if (position.documentId !== documentId) {
+      fail(new Error("Resume point belongs to another document revision"));
+    } else {
+      const charPosition = Math.max(0, Math.min(position.docCharPosition, chunks[chunks.length - 1]?.doc_char_end ?? 0));
+      void startChunk(chunkForPosition(chunks, charPosition), { ...position, docCharPosition: charPosition });
+      frame = requestAnimationFrame(tick);
     }
+    return () => {
+      active = false;
+      cancelAnimationFrame(frame);
+      reportPosition(capture());
+      // Lifecycle cleanup releases execution, never changes the requested intent.
+    };
+  }, [audioContext, documentId, chunks, position]);
 
-    function handleNaturalEnd(finishedId: number, generation: number) {
-      let nextId = finishedId + 1;
-      while (nextId < chunks.length && chunks[nextId].has_audio === false) nextId += 1;
-      if (nextId < chunks.length) {
-        void startChunk(nextId, chunks[nextId].doc_char_start, generation);
-      } else {
-        lastPositionRef.current = { documentId, docCharPosition: chunks[chunks.length - 1].doc_char_end };
-        playingRef.current = false;
-        onPlayingChange?.(false);
-        emitNaturalEnd();
-      }
-    }
-
-    function stopPlayback(): PlaybackPosition {
-      const info = audioEngineRef.current?.stop();
-      const pending = pendingStartRef.current;
-      generationRef.current += 1;
-      pendingStartRef.current = null;
-      playingRef.current = false;
-      setBuffering(false);
-      let point = pending ?? lastPositionRef.current;
-      if (info?.playingChunkId != null) {
-        const marks = marksRef.current.get(`${documentId}/${info.playingChunkId}`) ?? [];
-        const mark = markAtTime(marks, info.offsetSeconds * 1000);
-        point = {
-          documentId,
-          docCharPosition: mark?.docCharStart ?? lastPositionRef.current.docCharPosition,
-          chunkId: info.playingChunkId,
-          offsetMs: Math.max(0, info.offsetSeconds * 1000),
-        };
-      }
-      lastPositionRef.current = point;
-      onPlayingChange?.(false);
-      return point;
-    }
-
-    useImperativeHandle(ref, () => ({
-      play: async (resume?: PlaybackPosition | null) => {
-        if (playingRef.current) return;
-        if (resume?.documentId && resume.documentId !== documentId) {
-          throw new Error("Resume point belongs to another document revision");
-        }
-        const generation = ++generationRef.current;
-        if (!chunks.length) return;
-        const docPos = Math.max(0, Math.min(
-          resume?.docCharPosition ?? 0, chunks[chunks.length - 1].doc_char_end,
-        ));
-        const targetChunk = chunkForPosition(chunks, docPos);
-        const offsetMs = resume?.chunkId === targetChunk ? resume.offsetMs : undefined;
-        await startChunk(targetChunk, docPos, generation, offsetMs);
-      },
-      stop: () => stopPlayback(),
-      resolvePosition: async (point: PlaybackPosition): Promise<ResumePoint> => {
-        if (point.documentId !== documentId) {
-          throw new Error("Resume point belongs to another document revision");
-        }
-        return resolvePlaybackPosition(point, chunks, loadMarks);
-      },
-    }));
-
-    useEffect(() => {
-      if (!autoPlay) return;
-      if (!audioContext) return;
-      if (!chunks.length) return;
-      console.log('DocumentPlayback autoplay', {componentNumber});
-      const generation = ++generationRef.current;
-      void startChunk(0, chunks[0].doc_char_start, generation);
-    }, [autoPlay, audioContext, chunks, documentId]);
-
-    // Backend offsets count Unicode code points, not JavaScript UTF-16 units.
-    const characters = useMemo(() => Array.from(documentText), [documentText]);
-    const renderedText = useMemo(() => {
-      if (!documentText) return "Loading document...";
-      if (!highlight) return documentText;
-      const start = highlight.docCharStart;
-      const end = highlight.docCharEnd;
-      return (
-        <>
-          {characters.slice(0, start).join("")}
-          <mark>{characters.slice(start, end).join("")}</mark>
-          {characters.slice(end).join("")}
-        </>
-      );
-    }, [documentText, characters, highlight]);
-
-    return (
-      <section style={{ border: "1px solid #ccc", padding: "0.75rem" }}>
-        <h3>{title}</h3>
-        {error && <div role="alert">{error}</div>}
-        {buffering && <div role="status">Buffering audio…</div>}
-        <div
-          style={{
-            padding: "0.5rem",
-            background: "#fafafa",
-            border: "1px solid #eee",
-            minHeight: "160px",
-          }}
-        >
-          {renderedText}
-        </div>
-      </section>
-    );
-  }
+  const characters = useMemo(() => Array.from(documentText), [documentText]);
+  return <section style={{ border: "1px solid #ccc", padding: "0.75rem" }}>
+    <h3>{title}</h3>
+    {error && <div role="alert">{error}</div>}
+    {buffering && <div role="status">Buffering audio…</div>}
+    <div style={{ padding: "0.5rem", background: "#fafafa", minHeight: "160px" }}>
+      {highlight ? <>{characters.slice(0, highlight.docCharStart).join("")}<mark>
+        {characters.slice(highlight.docCharStart, highlight.docCharEnd).join("")}
+      </mark>{characters.slice(highlight.docCharEnd).join("")}</> : documentText}
+    </div>
+  </section>;
+}

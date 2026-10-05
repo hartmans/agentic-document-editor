@@ -15,7 +15,6 @@
 - `pytest` runs backend unit tests in `tests/`.
 - Tests require network. Do not mock components to avoid network or to avoid dependencies; ask for network access and ask for help if there is a missing dependency.
 
-* In the frontend, DocumentPlayback.tsx has some very complex state management. It has been reviewed extensively and is fragile. Ask and get explicit confirmation before changing. Also note that code is very react-19. React 19 deprecates ForwardRef and has useEffectEvent, both of which are critical to the state management there.
 ## Coding Style & Naming Conventions
 - TypeScript/TSX uses ES modules and React function components. Component files are PascalCase (e.g., `src/components/DocumentEditor.tsx`); utilities use descriptive camelCase names.
 - Follow `.editorconfig` for 2-space indentation in JS/JSON/YML; keep existing formatting in TS/TSX and Python files.

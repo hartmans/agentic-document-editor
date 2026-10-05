@@ -151,3 +151,56 @@ def test_successive_edits_and_readers_use_current_draft(tool_graph):
     assert published.document == "alpha beta"
     assert result["position"] == 11
     assert result["response_text"] == "Resuming."
+
+
+@pytest.mark.parametrize("content", [
+    "Done. Resuming playback.",
+    [{"type": "text", "text": "Done. Resuming playback."}],
+])
+def test_mixed_content_rejects_entire_tool_batch_before_any_edit(tool_graph, content):
+    state = DocumentState("Hello world", "Joanna")
+    calls = [
+        {"id": "edit", "name": "replace_text", "args": {
+            "before": "", "old_text": "Hello", "new_text": "Hi", "after": " world",
+        }},
+        {"id": "jump", "name": "reposition_playback", "args": {
+            "before": "Hello ", "target": "world", "after": "",
+        }},
+    ]
+    output = tool_graph(state, [AIMessage(content=content, tool_calls=calls), AIMessage(content="Retrying later.")])
+    errors = [message for message in output["messages"] if isinstance(message, ToolMessage)]
+    assert [message.tool_call_id for message in errors] == ["edit", "jump"]
+    assert all(message.status == "error" and "No tools were executed" in message.content for message in errors)
+    assert output["document_state"].document == "Hello world"
+    assert output["position"] == 0
+    assert output["response_text"] == "Retrying later."
+
+
+def test_mixed_content_retry_executes_edit_once_and_puts_response_in_message(tool_graph):
+    edit = {"id": "rejected", "name": "replace_text", "args": {
+        "before": "", "old_text": "Hello", "new_text": "Hello again", "after": " world",
+    }}
+    output = tool_graph(DocumentState("Hello world", "Joanna"), [
+        AIMessage(content="I edited it.", tool_calls=[edit]),
+        AIMessage(content="", tool_calls=[{**edit, "id": "retry"}]),
+        AIMessage(content="", tool_calls=[{"id": "jump", "name": "reposition_playback", "args": {
+            "before": "", "target": "Hello again", "after": " world", "message": "Done. Resuming there.",
+        }}]),
+    ])
+    messages = [message for message in output["messages"] if isinstance(message, ToolMessage)]
+    assert messages[0].status == "error"
+    assert output["document_state"].document == "Hello again world"
+    assert output["response_text"] == "Done. Resuming there."
+
+
+@pytest.mark.parametrize("content", [
+    " \n ",
+    [{"type": "reasoning", "reasoning": "Private reasoning"}],
+    [{"type": "thinking", "thinking": "Private reasoning"}, {"type": "text", "text": "  "}],
+])
+def test_whitespace_and_reasoning_do_not_reject_tool_calls(tool_graph, content):
+    output = tool_graph(DocumentState("Document", "Joanna"), [
+        AIMessage(content=content, tool_calls=[{"id": "pause", "name": "pause_playback", "args": {"message": "Paused."}}]),
+    ])
+    assert output["disposition"] == "pause"
+    assert output["response_text"] == "Paused."

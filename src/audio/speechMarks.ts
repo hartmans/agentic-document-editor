@@ -1,4 +1,26 @@
+import { fetchChunkMarks } from "../api";
 import type { DocumentChunk, ResumePoint, WordMark } from "../api";
+
+// Revisions are immutable. Playback and position resolution share the same
+// pending alignment request, independently of any player's effect lifetime.
+const speechMarks = new Map<string, Promise<WordMark[]>>();
+export function loadSpeechMarks(documentId: string, chunkId: number): Promise<WordMark[]> {
+  const key = `${documentId}/${chunkId}`;
+  let pending = speechMarks.get(key);
+  if (!pending) {
+    pending = fetchChunkMarks(documentId, chunkId).then((result) => {
+      if (result.documentId !== documentId || result.chunkId !== chunkId) {
+        throw new Error("Speech marks belong to another document chunk");
+      }
+      return result.marks;
+    }).catch((error) => {
+      speechMarks.delete(key);
+      throw error;
+    });
+    speechMarks.set(key, pending);
+  }
+  return pending;
+}
 
 export function chunkForPosition(
   chunks: Pick<DocumentChunk, "doc_char_end">[], position: number,

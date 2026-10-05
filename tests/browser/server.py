@@ -46,7 +46,7 @@ async def audio(mode: str = 'complete'):
 
 @app.get('/chunks/{document_id}/{chunk_id}/audio')
 async def chunk_audio(document_id: str, chunk_id: int):
-    return await audio('slow' if document_id == 'delayed' else 'complete')
+    return await audio('slow' if document_id == 'delayed' else 'pending' if document_id == 'pending' else 'complete')
 
 
 @app.get('/chunks/{document_id}/{chunk_id}/marks')
@@ -77,6 +77,13 @@ def status():
 
 @app.post('/instructions')
 def instructions(request: dict):
+    if request['instructions'] == 'silent edit':
+        return {'documentId': 'edited', 'document': DOCUMENT,
+                'responseDocumentId': 'empty-reply',
+                'responseDocument': {**DOCUMENT, 'document': '',
+                                     'chunks': [{'doc_char_start': 0, 'doc_char_end': 0, 'has_audio': False}]},
+                'resumePoint': {'documentId': 'edited', 'docCharPosition': 0},
+                'disposition': 'play'}
     return {'documentId': 'complete', 'document': DOCUMENT,
             'responseDocumentId': 'reply', 'responseDocument': DOCUMENT,
             'resumePoint': request['resumePoint'],
