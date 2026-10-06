@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from radio_drama import RenderResult
@@ -88,6 +88,30 @@ def instructions(request: dict):
             'responseDocumentId': 'reply', 'responseDocument': DOCUMENT,
             'resumePoint': request['resumePoint'],
             'disposition': 'pause' if request['instructions'] == 'pause' else 'play'}
+
+
+@app.get('/asr')
+def asr():
+    return {'type': 'gemma4'}
+
+
+@app.websocket('/ws/asr')
+async def transcribe_fixture(socket: WebSocket):
+    await socket.accept()
+    await socket.receive_json()
+    await socket.send_json({'type': 'started'})
+    while True:
+        message = await socket.receive()
+        if message.get('text'):
+            import json
+            if json.loads(message['text']).get('type') == 'end':
+                # Exercise the interval after input ends and before ASR completes.
+                await asyncio.sleep(0.5)
+                await socket.send_json({'type': 'result', 'instructions': socket.cookies.get('asr_response', '')})
+                await socket.close()
+                return
+        if message['type'] == 'websocket.disconnect':
+            return
 
 
 if __name__ == '__main__':

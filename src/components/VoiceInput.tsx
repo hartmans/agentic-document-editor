@@ -5,7 +5,7 @@ import { AudioCtx } from "../context/AudioContextProvider";
 import { Instructions } from "./Instructions";
 import { SpeechToText } from "../SpeechToText";
 
-type VadState = "idle" | "loading" | "listening" | "triggered" | "waiting" | "error";
+type SpeechPhase = "ready" | "recording" | "transcribing" | "delivering";
 
 interface VoiceInputProps {
   onInterrupt: () => void;
@@ -20,25 +20,26 @@ interface VoiceInputProps {
  */
 export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: VoiceInputProps) {
   const { audioContext, micStream } = useContext(AudioCtx);
-  const [vadState, setVadState] = useState<VadState>("idle");
+  const [phase, setPhase] = useState<SpeechPhase>("ready");
+  const [vad, setVad] = useState<VadLifecycle | null>(null);
+  const [listening, setListening] = useState(false);
   const [vadError, setVadError] = useState<string | null>(null);
   const [speechProbability, setSpeechProbability] = useState(0);
   const [instructions, setInstructions] = useState("");
-  const [sttCompleted, setSttCompleted] = useState(false);
 
-  const vadRef = useRef<VadLifecycle | null>(null);
   const sttRef = useRef<SpeechToText | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
-  const enabledRef = useRef(enabled);
-  const triggeredRef = useRef(false);
   const prerollBufferRef = useRef<Float32Array>(new Float32Array(31200));
   const prerollWriteIdxRef = useRef(0);
+
+  const micEnabled = Boolean(audioContext && micStream);
+  const canTrigger = micEnabled && enabled && listening && phase === "ready" && !vadError;
 
   const reportVadError = useEffectEvent((err: unknown) => {
     console.error("VAD transition failed", err);
     setVadError((err as Error).message || "VAD transition failed");
-    setVadState("error");
+    setListening(false);
   });
 
   const appendInstruction = (text: string) => {
@@ -51,15 +52,13 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
 
   const handleTransportStop = useEffectEvent(() => {
     sttRef.current = null;
-    triggeredRef.current = false;
-    setVadState("waiting");
-    setSttCompleted(true);
+    setPhase("delivering");
   });
 
   const beginSpeech = useEffectEvent(() => {
-    if (!enabledRef.current || triggeredRef.current || !audioContext) return;
-    triggeredRef.current = true;
-    setVadState("triggered");
+    if (!canTrigger || sttRef.current || !audioContext) return;
+    setPhase("recording");
+    setInstructions("");
     const preroll = linearizeRing(prerollBufferRef.current, prerollWriteIdxRef.current);
     const stt = new SpeechToText({
       sampleRate: audioContext.sampleRate,
@@ -72,42 +71,44 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
   });
 
   const finishSpeech = useEffectEvent(() => {
-    sttRef.current?.finish();
+    if (!sttRef.current) return;
+    setPhase("transcribing");
+    sttRef.current.finish();
   });
 
   useEffect(() => {
-    enabledRef.current = enabled;
-    if (!enabled) {
-      sttRef.current?.close();
-      sttRef.current = null;
-      triggeredRef.current = false;
-      setVadState("idle");
-      setSttCompleted(false);
-      void vadRef.current?.setEnabled(false).catch(reportVadError);
-      return;
-    }
+    if (enabled) return;
+    sttRef.current?.close();
+    sttRef.current = null;
+    setPhase("ready");
+  }, [enabled]);
 
-    setInstructions("");
-    setSttCompleted(false);
-    prerollBufferRef.current.fill(0);
-    prerollWriteIdxRef.current = 0;
-    if (vadRef.current) {
-      setVadState("listening");
-      void vadRef.current.setEnabled(true).catch(reportVadError);
-    } else if (audioContext && micStream) {
-      setVadState("loading");
+  const shouldListen = enabled && (phase === "ready" || phase === "recording");
+  useEffect(() => {
+    let active = true;
+    setListening(false);
+    if (vad) {
+      void vad.setEnabled(shouldListen).then(() => {
+        if (active) setListening(shouldListen);
+      }).catch((err: unknown) => { if (active) reportVadError(err); });
     }
-  }, [enabled, audioContext, micStream]);
+    return () => { active = false; };
+  }, [vad, shouldListen]);
 
   useEffect(() => {
-    if (!sttCompleted) return;
+    if (phase !== "delivering") return;
     emitInstructions(instructions);
-    setSttCompleted(false);
-  }, [sttCompleted, instructions, emitInstructions]);
+    // Even an empty transcript needs a fresh segmentation state. The change
+    // through transcribing/delivering pauses VAD before this rearm can run.
+    if (!instructions.trim()) setPhase("ready");
+    // A nonempty instruction waits for the editor's disabled/enabled cycle.
+  }, [phase, instructions]);
 
   useEffect(() => {
     if (!audioContext || !micStream) return;
     let cancelled = false;
+    let lifecycle: VadLifecycle | null = null;
+    setVad(null);
     setVadError(null);
 
     void MicVAD.new({
@@ -130,24 +131,18 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
         await vad.destroy();
         return;
       }
-      const lifecycle = new VadLifecycle(vad);
-      vadRef.current = lifecycle;
-      if (enabledRef.current) {
-        setVadState("listening");
-        await lifecycle.setEnabled(true);
-      }
+      lifecycle = new VadLifecycle(vad);
+      setVad(lifecycle);
     }).catch((err: unknown) => {
       if (cancelled) return;
       console.error("Failed to initialize VAD", err);
       setVadError((err as Error).message || "Failed to initialize VAD");
-      setVadState("error");
+      setListening(false);
     });
 
     return () => {
       cancelled = true;
-      const vad = vadRef.current;
-      vadRef.current = null;
-      if (vad) void vad.destroy().catch((err: unknown) => console.error("Failed to destroy VAD", err));
+      if (lifecycle) void lifecycle.destroy().catch((err: unknown) => console.error("Failed to destroy VAD", err));
     };
   }, [audioContext, micStream]);
 
@@ -161,7 +156,6 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
 
     const processor = audioContext.createScriptProcessor(1024, 1, 1);
     processor.onaudioprocess = (event) => {
-      if (!enabledRef.current) return;
       const input = event.inputBuffer.getChannelData(0);
       sttRef.current?.queue_chunk(input, false);
 
@@ -190,8 +184,13 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
     };
   }, [audioContext, micStream]);
 
-  const micEnabled = Boolean(audioContext && micStream);
-  const controlsDisabled = Boolean(!micEnabled || !enabled);
+  const controlsDisabled = !canTrigger;
+  const vadState = vadError ? "error" : !micEnabled ? "microphone unavailable"
+    : !enabled ? "paused while editor is unavailable"
+    : phase === "transcribing" ? "paused while transcribing"
+    : phase === "delivering" ? "paused while delivering instructions"
+    : phase === "recording" ? "recording current utterance"
+    : !vad ? "loading" : !listening ? "arming" : "listening";
 
   return (
     <section style={{ border: "1px solid #ccc", padding: "0.5rem" }}>
@@ -199,7 +198,7 @@ export function VoiceInput({ onInterrupt, onInstructions, enabled = false }: Voi
         <button onClick={onInterrupt} disabled={controlsDisabled}>
           Interrupt now
         </button>
-        <span>VAD status: {vadState} (speech {speechProbability.toFixed(3)})</span>
+        <span>VAD status: {vadState}; {canTrigger ? "speech will trigger" : "new speech will not trigger"} (speech {speechProbability.toFixed(3)})</span>
       </div>
       {vadError && <div style={{ color: "red" }}>{vadError}</div>}
       <div aria-live="off" style={{ position: "absolute", left: "-9999px" }}>
